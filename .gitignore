@@ -1,1 +1,13 @@
+# Personal and confidential documents -- never publish.
 research/
+
+# Build output. pages.db and canonical_export.json contain the extracted
+# full text of everything in research/, so these must never be published.
+engine/artefacts/
+
+# Local environment and scratch state.
+engine/.venv/
+engine/state/
+engine/99_scratch/
+engine/bin/__pycache__/
+_private/
