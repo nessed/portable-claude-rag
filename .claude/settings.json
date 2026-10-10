@@ -60,7 +60,10 @@
    "Bash(\"engine/.venv/Scripts/python.exe\":*)",
    "Bash(engine/bin/hooks.cmd:*)",
    "Bash(\"engine/bin/hooks.cmd\":*)",
-   "Bash(pdftotext:*)"
+   "Bash(pdftotext:*)",
+   "Bash(python --version)",
+   "Bash(python -m venv:*)",
+   "Bash(engine\\.venv\\Scripts\\python.exe:*)"
   ]
  }
 }

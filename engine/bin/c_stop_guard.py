@@ -351,7 +351,10 @@ def main():
         # (4) and (5): the ON header and the machinery vocabulary. Both are reported in the
         # same block as the citation problem, so one round trip fixes everything.
         extra = []
-        if REQUIRE_HEADER and final.strip() and not final.lstrip().startswith(REQUIRE_HEADER):
+        # The header may arrive dressed as markdown: Test 4 saw `(research assistant on)` in
+        # backticks on every reply, and each one was sent back for a header it already had.
+        if (REQUIRE_HEADER and final.strip()
+                and not final.lstrip().lstrip("`*_ ").startswith(REQUIRE_HEADER)):
             extra.append(REASON_HEADER.format(h=REQUIRE_HEADER))
             rules.append("missing_header")
         if BAN_PHRASES_ON and final.strip():

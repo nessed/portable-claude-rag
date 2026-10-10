@@ -6,19 +6,21 @@ answer questions about them with the page every answer came from.
 ## Start
 
 Double-click **Start research assistant.cmd**. The first time, it sets itself up: it reads
-every document once (about 3 to 6 minutes per 1,000 files) and then says it is ready.
+every document once (about five minutes per 1,000 files) and then says it is ready.
+During that first setup Claude Code asks permission to run a few commands; answer yes.
 Every later time it just opens Claude Code here, ready for questions.
 
 If you prefer a terminal: open one in this folder, run `claude --model claude-opus-5`, and
 type `initialize` the first time.
 
 You need Python 3.11 or newer (python.org, tick "Add python.exe to PATH"), Git for Windows
-(git-scm.com, defaults), and Claude Code. The first setup also downloads a 130 MB model once.
+(git-scm.com, defaults; the tool uses the PDF reader that comes with it), and Claude Code.
+The first setup also downloads a 130 MB model once, into `engine\models`.
 
 ## Ask
 
 Ask in plain English: "How has spending on X changed over the last ten years?" An answer
-takes one to three minutes because it opens real pages before replying. Every number ends
+takes two to four minutes because it opens real pages before replying. Every number ends
 with a `Sources` line: the file, the page and the exact line. Open the file at that page
 to check; do that a few times early on.
 

@@ -91,6 +91,16 @@ STATE = CORPUS_LAB / "state"
 FINDINGS = CORPUS_LAB / "05_findings"
 STACKS = CORPUS_LAB / "02_stacks"
 
+# The embedding model's cache. fastembed's default is the user's TEMP directory, which is
+# outside the folder (so "delete the folder and it is gone" was not true) and is emptied by
+# Windows disk cleanup (so the 130 MB download repeated for no reason). In a shipped package
+# -- recognised by its manifest, so the lab's own cache is left alone -- the model is kept
+# in engine/models. Every script that loads the model imports this module first, and
+# fastembed reads the variable when the model is constructed.
+MODELS = CORPUS_LAB / "models"
+if (CORPUS_LAB / "PACKAGE_MANIFEST.json").exists() and not os.environ.get("FASTEMBED_CACHE_PATH"):
+    os.environ["FASTEMBED_CACHE_PATH"] = str(MODELS)
+
 RUNS = _env_path("RUNS_ROOT") or _first_existing(
     PRIVATE / "results" / "03_runs", CORPUS_LAB / "03_runs")
 

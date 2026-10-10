@@ -15,3 +15,6 @@ _private/
 # The on/off flag file
 engine/OFF
 engine/OFF.*
+
+engine/models/
+engine/OFF

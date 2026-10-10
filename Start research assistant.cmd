@@ -19,7 +19,8 @@ if exist "engine\artefacts\READY" (
   claude --model claude-opus-5
 ) else (
   echo First run: the tool will set itself up now. It reads every document in this folder
-  echo once, roughly 3 to 6 minutes per 1,000 files, and then it is ready for questions.
+  echo once, about five minutes per 1,000 files, and then it is ready for questions.
+  echo Claude Code will ask permission to run a few setup commands. Answer yes to each.
   echo If Claude Code asks whether you trust this folder, answer yes.
   claude --model claude-opus-5 "initialize"
 )

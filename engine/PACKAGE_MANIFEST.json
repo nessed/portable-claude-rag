@@ -1,11 +1,11 @@
 {
  "schema": "package_manifest/2",
  "layout": "paste-in",
- "name": "retrieval-portable-81fad6c",
- "built_utc": "2026-10-10T17:42:19Z",
- "package_commit": "81fad6c615cc7edea9be1f6ef8ecc43bb6a0f4f2",
+ "name": "retrieval-portable-50e14b6",
+ "built_utc": "2026-10-10T20:27:44Z",
+ "package_commit": "50e14b64d1c6d18c494096c1c86afa04d7fe3149",
  "package_branch": "paste-in-redesign",
- "package_dirty": true,
+ "package_dirty": false,
  "default_builder": "v1",
  "builder_note": "v1 is the builder every measured number rests on. v2 is experimental, failed Gate S 2026-09-15, and is reachable only via --builder v2, which warns and stamps the manifest.",
  "allowlist": [
@@ -52,7 +52,7 @@
   "tests"
  ],
  "files_sha256": {
-  ".claude/settings.json": "b9ba58fd9db1f8eeb32c44993146ab0906ab1e600205e8d346b7ba7c035dbf34",
+  ".claude/settings.json": "be350a1cc002c4af3154424f60e8545bbfad3bbd6f3a39e357a6e138f8c30a17",
   ".claude/skills/ask/SKILL.md": "ad2cf05b88f46281e55cc7eca7572f85a07f7adda392ea58d079a229a50a1996",
   ".claude/skills/rag-off/SKILL.md": "e29d6f1965b8915461a3fe1ce70888682c70385eddb531cf0b32fdd8f04d385d",
   ".claude/skills/rag-on/SKILL.md": "106e54ead4e4861eea90101ba616781832ff0194a74c06ad88dbabf2d75c13f2",
@@ -76,24 +76,24 @@
   "engine/bin/c_shelf_update.py": "4af1bad0d4da8d279b7a8d2e228c252272a139b4e3b49668ffa6769be233d76f",
   "engine/bin/c_shelf_update_selftest.py": "22b4fe9d7a8c8438f7d687edf30522e6345073271fa0cbe582609ef6b7e5d898",
   "engine/bin/c_stack.py": "a9269af68567a1bc1e0ad0529d3868e2a2d45be86f7fc82beb20d7c5499b21bf",
-  "engine/bin/c_stop_guard.py": "418cf030c4a8c89d442703a298feb90e6084a3a330bcbfee44804d447148ca90",
-  "engine/bin/c_stop_guard_selftest.py": "ea9b122dbcfe08ce841a7c45c7412a9cacb559cc258ac6b17bfd1397e4d0a99f",
+  "engine/bin/c_stop_guard.py": "ad749f61265820ba6a4ecaf7903052a69eb98f2283225d05fd8e9474fb3f6269",
+  "engine/bin/c_stop_guard_selftest.py": "b08c84aa3d82d2b6aef8427cf67d897acb61f9d40c39e1b190194080d4594a60",
   "engine/bin/c_verify_guard.py": "821afc5434f215cd4239535ade1ef686a88d6a4411f6b3f8c3e1e1988221aa1b",
   "engine/bin/corpus_search.py": "99696dabb297397c2b2ec45de648838e0361d6471e3776807a35f3b2fe6ceeb0",
   "engine/bin/hooks.cmd": "f5f5767bf0c4a3180f1f900969ebed59aabef7d30602369ae6203e44b057a729",
   "engine/bin/index_build.py": "32b190a1e4c51c9a927db4c66f4bfe4747138c6116b68150d9a0ede470c5b19e",
-  "engine/bin/labpaths.py": "3b4e8324924b351579a7b19ece7096a2f62e87a1c080a4e8199ab5788467f64d",
+  "engine/bin/labpaths.py": "5b4915b33060e2bcf94d63f022950ab853a832c6d27eacb162b5753a151f9dff",
   "engine/bin/run_record.py": "d17f1f1a70c68db80144c8ad473f6b252f3e89c55cd18d859abb4c861dc7f43c",
   "engine/bin/scoring.py": "3f310bdbbe620a21e15aee1f2c3cea50140e89a79e1cfed7992d88434f9220a3",
   "engine/bin/setup_folder.py": "5a48b9586a00b614bcd5ee188b2b86c3083a633146675552dd718d662af6f104",
   "engine/bin/stack.py": "34f1fcd6877dd7fb861b9146951f3a7716db41764fa500e7ea28df7f6b04f14a",
   "engine/bin/trajectory_filler.py": "1e96f24f6ed428d18730ebbe66dd6e3e184d2b1eb7c16aa0e2eae30390377269",
   "engine/CLAUDE_ROOT.md": "8293187e06fac6652148ac69406c9630ce4042f1fdc1f092d3a79085258a7d47",
-  "engine/INITIALIZE.md": "a0b43e8e666b0645f4ee93037a6c5b92ab68f2e35bb1088fb819b890014bd4a6",
-  "engine/INSTALL.md": "ab305c7f267f6cf07a641c1a13e25eb2676fbd3f24cd42b3c40e018191cb7a83",
+  "engine/INITIALIZE.md": "52500cc717a48b60bfcbf3373cfffb368b4d546645dc88d55ab1b65cf8c8b6a5",
+  "engine/INSTALL.md": "dd7744ebb2a114cf1b9aafa93ec2926a019bf3c5794648bb8e55b58eabb02436",
   "engine/requirements-portable.txt": "0da4c7d11be8d9e41a9981d488837b667fb08ee3dbdb062cc6f38bfe9ae9be38",
-  "README_FIRST.md": "58bd293a356404797bd06b66215e36641c0e1c14428abdb91d05e717e5a8f82e",
-  "Start research assistant.cmd": "ccbe8eb84a837d404b2e16a7d1ce929f28a224b5dc063c700f73d73eb9e3b0cc"
+  "README_FIRST.md": "ed9fbe54fb36b3ac0abbfd2a74b3448ff386cb94cd56e36d35bb85d9156ad0df",
+  "Start research assistant.cmd": "4951e0e6a111cd6ae9ba09c982751556778e6683c2b245d9899329e40fc79825"
  },
  "forbidden_string_hits": []
 }

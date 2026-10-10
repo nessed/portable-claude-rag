@@ -28,7 +28,7 @@ From the documents folder:
 
 ```
 python -m venv engine\.venv
-engine\.venv\Scripts\pip install -r engine\requirements-portable.txt
+engine\.venv\Scripts\python.exe -m pip install --no-cache-dir -r engine\requirements-portable.txt
 engine\.venv\Scripts\python.exe engine\bin\setup_folder.py doctor
 ```
 

@@ -236,6 +236,10 @@ def main():
                      "(research assistant on)\n\nThe figure is 4321, from %s page 7.\n\nSources\n4321 | %s | p7 | \"x\"" % (OPENED, OPENED))
     d20, _ = run_guard(t20, "hdr-B", markers=markers, v2=True, extra_args=HDR)
     chk("header_present_passes", d20.get("decision") != "block", decision=d20.get("decision"))
+    t20b = transcript(tmp, [(OPENED, 7)],
+                      "`(research assistant on)`\n\nThe figure is 4321, from %s page 7.\n\nSources\n4321 | %s | p7 | \"x\"" % (OPENED, OPENED))
+    d20b, _ = run_guard(t20b, "hdr-B2", markers=markers, v2=True, extra_args=HDR)
+    chk("header_in_backticks_passes", d20b.get("decision") != "block", decision=d20b.get("decision"))
     t21 = transcript(tmp, [(OPENED, 7)],
                      "(research assistant on)\n\nI searched the whole index with five rewrites and the shelf returned nothing on floods.\n\nSources\nnone")
     d21, _ = run_guard(t21, "hdr-C", markers=markers, v2=True, extra_args=HDR)

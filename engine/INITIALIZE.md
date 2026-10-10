@@ -27,10 +27,10 @@ Before you run anything, say roughly this, in your own words:
 
 > I'm going to set up a Python environment inside `engine`, then read every
 > document in this folder once and build a searchable index of it. The reading pass
-> is the slow part: roughly three to six minutes per thousand documents, and
+> is the slow part: about five minutes per thousand documents, and
 > it uses most of the CPU while it runs. Nothing is written to this folder outside
-> `engine`, and none of your documents is modified. The only thing outside the folder
-> is a 130 MB language model cached under your user profile on the first run. Say
+> `engine`, and none of your documents is modified. That includes the 130 MB language
+> model the first run downloads: it is kept in `engine\models`, not in your user profile. Say
 > stop at any point and nothing is lost -- rerunning resumes.
 
 Then go, without waiting for permission. They already said initialize.
@@ -64,7 +64,7 @@ Do not try to install Python for them.
 
 ```
 python -m venv engine\.venv
-engine\.venv\Scripts\python.exe -m pip install -r engine\requirements-portable.txt
+engine\.venv\Scripts\python.exe -m pip install --no-cache-dir -r engine\requirements-portable.txt
 ```
 
 The pip step downloads roughly 200 MB and takes a few minutes on a normal
@@ -89,7 +89,7 @@ One line per prerequisite. Read them all before reacting.
   are talking to you right now, Claude Code is installed; set `CLAUDE_CMD` to the
   `claude.exe` you can find, or just skip it and use the interactive route.
 - **embedding_model ... NOT found** -- not a failure. It says the first index
-  build will download a 130 MB model, so that build needs internet.
+  build will download a 130 MB model into `engine\models`, so that build needs internet.
 - **free_disk FAIL** -- they need about 1 GB per 2,000 documents. Say the number.
 - **ocr ... not found** -- not a failure. It means a scanned page with no text
   layer is reported as `image_only_no_text` rather than read. OCR is off unless
@@ -159,7 +159,7 @@ Say, in your own words:
 
 > It's ready, and it's on. Ask me anything about these documents right here, in plain
 > English -- "how has spending on X changed over the last ten years?" An answer usually
-> takes one to three minutes, because I open the real pages before I reply. Every number
+> takes two to four minutes, because I open the real pages before I reply. Every number
 > comes with a `Sources` line naming the file and page it came from, and when the folder
 > does not contain the answer, I say so instead of guessing.
 >
