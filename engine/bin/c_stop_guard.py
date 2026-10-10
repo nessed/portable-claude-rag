@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import labpaths as L  # noqa: E402
 
 LOG = Path(os.environ.get("STOP_GUARD_LOG",
-                          str(L.RUNS / "hooks" / "stop_guard__unlabelled.log")))
+                          str(L.hook_log_dir() / "stop_guard__unlabelled.log")))
 MARKER_DIR = Path(os.environ.get("STOP_GUARD_MARKERS",
                                  str(L.SCRATCH / "stop_guard_markers")))
 
@@ -45,6 +45,10 @@ CITED_RE = re.compile(
 OPEN_RE = re.compile(r"open\s+(?P<q>[\"'])(?P<rel>.+?)(?P=q)\s+(?P<page>\d+)", re.S)
 OPEN_BARE_RE = re.compile(r"open\s+(?P<rel>\S+\." + EXTS + r")\s+(?P<page>\d+)", re.I)
 
+# The reader never sees this exchange: after fixing it, give the whole answer again from
+# the top as your first reply would read, without mentioning the check or what changed.
+RESTATE = (" Then give the whole answer again from the top, as your first reply would "
+           "read. Do not mention this check, what it raised, or what you changed.")
 REASON = ("You cited {path} without opening it. Either open that page and quote the "
           "supporting line, or remove the citation. Do not add any figure you have "
           "not opened.")
@@ -66,6 +70,38 @@ REASON = ("You cited {path} without opening it. Either open that page and quote 
 # and a `set VAR=1 &&` prefix means different things to cmd.exe and to bash, so
 # a shell-independent switch is the only one that cannot fail silently.
 V2_ON = (os.environ.get("STOP_GUARD_V2") == "1") or ("--v2" in sys.argv)
+
+# Test 2 (2026-10-10). Two more checks, each behind its own argument so the lab's
+# recorded numbers still reproduce without them; hooks.cmd passes both.
+#   --require-header "<line>"  the reply must begin with this line (the ON marker)
+#   --ban-phrases              the reply must not use the tool's own vocabulary
+REQUIRE_HEADER = None
+for _i, _a in enumerate(sys.argv):
+    if _a == "--require-header" and _i + 1 < len(sys.argv):
+        REQUIRE_HEADER = sys.argv[_i + 1]
+BAN_PHRASES_ON = "--ban-phrases" in sys.argv
+#   --sources-last             nothing may follow the Sources block (Test 3: Q03, S05 put a
+#                              caution after it, where a reader checking sources stops reading)
+SOURCES_LAST_ON = "--sources-last" in sys.argv
+SOURCE_LINE_RE = re.compile(r"^\s*(?:[-*]|\d+\.|\|)|\s\|\s")
+REASON_SOURCES_LAST = ("End the reply with the Sources block. Move the text that now follows it "
+                       "above the block.")
+# Vocabulary that belongs to the machinery, not to an answer. Deliberately NOT the bare word
+# "index": economics prose is full of indices, and the status reply has to say when the
+# index was built. The phrases here are the ones Test 2 actually saw leak (Q17, Q10, S02);
+# "rewrite" alone is ordinary English ("rewrite its table", Q16) and matches only as the search term.
+MACHINERY_RE = re.compile(
+    r"(?<![A-Za-z])(?:the shelf|shelf (?:returned|gave|listed|showed)|"
+    r"(?:\d+|two|three|four|five|six|several|my|the) rewrites|"
+    r"rewrites? (?:of|for) (?:the|my) (?:question|query|search)|(?:query|search) rewrites?|"
+    r"the whole index|occur in the index|search(?:ed|ing)? the index|not indexed|"
+    r"hooks?(?![A-Za-z])|slugs?(?![A-Za-z])|exit code|harness|coverage line|"
+    r"(?:stop|verify|note|citation) guard|c_shelf|99_scratch|engine[\\/]bin)", re.I)
+REASON_HEADER = ("Begin the reply with the line `{h}` on its own, before anything else; "
+                 "every reply while the research assistant is on starts with it.")
+REASON_MACHINERY = ("The reply uses the tool's own vocabulary ({words}). Say it in plain "
+                    "words a reader would use -- what you looked for and what you found -- "
+                    "with no account of how the search was run.")
 
 # A page reference in prose. The leading literal `p` is what keeps a fiscal year
 # (2012-13) or a bare year (2019) from being read as a page number.
@@ -101,6 +137,26 @@ def page_refs(text):
 def has_sources_block(text):
     return bool(SOURCES_HEAD_RE.search(text or "")) or bool(
         re.search(r"(?<![A-Za-z])sources\s*:", text or "", re.I))
+
+
+def prose_after_sources(text):
+    """True if a Sources block is followed by ordinary prose: a non-empty line, after at least
+    one source line, that is neither a list item nor a table row."""
+    t = text or ""
+    heads = list(SOURCES_HEAD_RE.finditer(t))
+    if not heads:
+        return False
+    tail = t[heads[-1].end():].splitlines()
+    seen_source = False
+    for line in tail:
+        if not line.strip():
+            continue
+        if SOURCE_LINE_RE.search(line):
+            seen_source = True
+            continue
+        if seen_source:
+            return True
+    return False
 
 
 def figures_without_citation(text):
@@ -186,6 +242,49 @@ def read_transcript(path, with_pages=False):
     return (opened, final, pairs) if with_pages else (opened, final)
 
 
+def turn_key(path):
+    """The uuid of the last real user message in the transcript: one per turn. The guards
+    ask at most once per TURN -- a session with the professor runs for hours and dozens of
+    questions, and a once-per-session marker (Test 2) meant the first block during
+    `initialize` silenced the guard for everything that followed. Re-entry within a turn is
+    still covered by stop_hook_active, so a session that disagrees always terminates."""
+    p = Path(path) if path else None
+    if not p or not p.exists():
+        return "noturn"
+    key = None
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or '"user"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("type") != "user":
+            continue
+        content = (d.get("message") or {}).get("content")
+        if isinstance(content, list):
+            if any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content):
+                continue
+            text = " ".join((c.get("text") or "") for c in content
+                            if isinstance(c, dict) and c.get("type") == "text")
+        else:
+            text = str(content or "")
+        if text.lstrip().startswith("Stop hook feedback"):
+            continue
+        key = d.get("uuid") or key
+    return key or "noturn"
+
+
+def blocked_this_turn(marker, key):
+    if not marker.exists():
+        return False
+    try:
+        return marker.read_text(encoding="utf-8", errors="replace").strip().endswith(" " + key)
+    except OSError:
+        return False
+
+
 def cited_paths(text):
     out = []
     for m in CITED_RE.finditer(text or ""):
@@ -214,8 +313,10 @@ def main():
     unopened = []
 
     v2_hit = None
-    # Ask at most once per session, and never on a re-entry the hook caused.
-    if not stop_hook_active and not marker.exists():
+    rules = []
+    key = turn_key(transcript)
+    # Ask at most once per turn, and never on a re-entry the hook caused.
+    if not stop_hook_active and not blocked_this_turn(marker, key):
         opened, final, pairs = read_transcript(transcript, with_pages=True)
         for c in cited_paths(final):
             if not any(same_path(c, o) for o in opened):
@@ -245,9 +346,29 @@ def main():
             if reason is None and figures_without_citation(final):
                 v2_hit = "figures_no_citation"
                 reason = REASON_NO_CITE
+        if v2_hit:
+            rules.append(v2_hit)
+        # (4) and (5): the ON header and the machinery vocabulary. Both are reported in the
+        # same block as the citation problem, so one round trip fixes everything.
+        extra = []
+        if REQUIRE_HEADER and final.strip() and not final.lstrip().startswith(REQUIRE_HEADER):
+            extra.append(REASON_HEADER.format(h=REQUIRE_HEADER))
+            rules.append("missing_header")
+        if BAN_PHRASES_ON and final.strip():
+            words = sorted({m.group(0).lower() for m in MACHINERY_RE.finditer(final)})
+            if words:
+                extra.append(REASON_MACHINERY.format(words=", ".join(words[:6])))
+                rules.append("machinery_words")
+        if SOURCES_LAST_ON and prose_after_sources(final):
+            extra.append(REASON_SOURCES_LAST)
+            rules.append("prose_after_sources")
+        if extra:
+            reason = " ".join(([reason] if reason else []) + extra)
+            v2_hit = v2_hit or rules[0]
         if reason:
-            marker.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
-            decision = {"decision": "block", "reason": reason}
+            marker.write_text("%s %s" % (time.strftime("%Y-%m-%dT%H:%M:%S"), key),
+                              encoding="utf-8")
+            decision = {"decision": "block", "reason": reason + RESTATE}
 
     try:
         LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -260,6 +381,8 @@ def main():
                 "blocked": bool(reason),
                 "v2": V2_ON,
                 "v2_rule": v2_hit,
+                "rules": rules,
+                "turn": key[:8],
             }) + "\n")
     except Exception:
         pass

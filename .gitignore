@@ -11,3 +11,7 @@ engine/state/
 engine/99_scratch/
 engine/bin/__pycache__/
 _private/
+
+# The on/off flag file
+engine/OFF
+engine/OFF.*

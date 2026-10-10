@@ -1,0 +1,66 @@
+{
+ "hooks": {
+  "SessionStart": [
+   {
+    "matcher": "",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"engine/bin/hooks.cmd\" session",
+      "timeout": 120
+     }
+    ]
+   }
+  ],
+  "UserPromptSubmit": [
+   {
+    "matcher": "",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"engine/bin/hooks.cmd\" prompt",
+      "timeout": 30
+     }
+    ]
+   }
+  ],
+  "PreToolUse": [
+   {
+    "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"engine/bin/hooks.cmd\" guard",
+      "timeout": 30
+     }
+    ]
+   }
+  ],
+  "Stop": [
+   {
+    "matcher": "",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"engine/bin/hooks.cmd\" stop1",
+      "timeout": 120
+     },
+     {
+      "type": "command",
+      "command": "\"engine/bin/hooks.cmd\" stop2",
+      "timeout": 180
+     }
+    ]
+   }
+  ]
+ },
+ "permissions": {
+  "allow": [
+   "Bash(engine/.venv/Scripts/python.exe:*)",
+   "Bash(\"engine/.venv/Scripts/python.exe\":*)",
+   "Bash(engine/bin/hooks.cmd:*)",
+   "Bash(\"engine/bin/hooks.cmd\":*)",
+   "Bash(pdftotext:*)"
+  ]
+ }
+}

@@ -25,9 +25,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import labpaths as L  # noqa: E402
-from corpus_search import content_words, coverage as _cs_coverage  # noqa: E402
+from corpus_search import (content_words, coverage as _cs_coverage,
+                           THIN_CHARS as _THIN_CHARS)  # noqa: E402
 
-REG_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home())) ) / "retrieval-lab" / "roots.json"
+# Paste-in layout (2026-10-10): the registry lives inside the package (engine\state), so
+# nothing is left on the machine outside the folder and the folder can be moved. The old
+# machine-global registry is still READ as a fallback so existing lab installs resolve.
+REG_PATH = Path(os.environ.get("RETRIEVAL_REGISTRY") or (L.STATE / "roots.json"))
+LEGACY_REG_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "retrieval-lab" / "roots.json"
+# Bump when the SHAPE of the coverage dict changes, so a cache written by an older
+# build cannot hide a newly added field on an index that has not otherwise changed.
+_COVERAGE_VERSION = 3   # 3 adds coverage()['thin_by_file']: a cache written before it would
+#                         hide the per-file breakdown forever, because the index it
+#                         describes has not changed and its stamp still matches.
 FY_RE = re.compile(r"\b(20[0-3]\d-\d\d)\b")
 
 _MODEL = None  # module-level singleton; loaded only when `find` needs vectors
@@ -48,13 +58,21 @@ def _norm_root_key(p):
     return str(Path(p).resolve()).replace("\\", "/").lower()
 
 
-def _load_registry():
-    if REG_PATH.exists():
+def _read_registry_file(p):
+    if p.exists():
         try:
-            return json.loads(REG_PATH.read_text(encoding="utf-8"))
+            return json.loads(p.read_text(encoding="utf-8"))
         except Exception:
-            return {}
+            pass
     return {}
+
+
+def _load_registry():
+    """The merged view used to RESOLVE a root: legacy machine registry, then the package's
+    own, which wins on a key clash."""
+    reg = _read_registry_file(LEGACY_REG_PATH)
+    reg.update(_read_registry_file(REG_PATH))
+    return reg
 
 
 def _save_registry(reg):
@@ -62,8 +80,25 @@ def _save_registry(reg):
     REG_PATH.write_text(json.dumps(reg, indent=1), encoding="utf-8")
 
 
+def _in_place_root(start):
+    """Walk up from `start` for a folder that holds engine/artefacts/pages.db and the
+    shelf: the paste-in layout, which needs no registry at all."""
+    cur = Path(start).resolve()
+    while True:
+        db = cur / "engine" / "artefacts" / "pages.db"
+        shelf = cur / "engine" / "artefacts" / "shelf" / "shelf.db"
+        if db.exists() and shelf.exists():
+            return cur, db, shelf
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
+
+
 def do_register(root, db, shelf):
-    reg = _load_registry()
+    # Write back only the package's own file. Loading the merged view here copied every
+    # entry of the developer's machine-wide registry into the shipped folder (seen in
+    # Test 2: nine lab paths inside the professor's engine/state/roots.json).
+    reg = _read_registry_file(REG_PATH)
     key = _norm_root_key(root)
     entry = dict(reg.get(key, {}))
     entry["root"] = str(Path(root).resolve()).replace("\\", "/")
@@ -77,6 +112,12 @@ def do_register(root, db, shelf):
 def _resolve(explicit_db, explicit_shelf):
     if explicit_db and explicit_shelf:
         return None, explicit_db, explicit_shelf
+    # The paste-in layout first: the index sits beside the documents, so the folder itself
+    # says where it is and a registry entry (or its absence after a move) cannot mislead.
+    hit = _in_place_root(Path.cwd())
+    if hit:
+        root, db, shelf = hit
+        return root, explicit_db or str(db), explicit_shelf or str(shelf)
     reg = _load_registry()
     cur = Path.cwd().resolve()
     while True:
@@ -99,7 +140,10 @@ def _corpus_key(root_key_str):
 def _notes_dir(root):
     key = _norm_root_key(root) if root else "no-root"
     ck = _corpus_key(key)
-    d = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "retrieval-lab" / "notes" / ck
+    # Inside the package (engine/state/notes), not under %LOCALAPPDATA%: nothing is left
+    # on the machine outside the folder. RETRIEVAL_NOTES_DIR overrides for the lab.
+    base = Path(os.environ.get("RETRIEVAL_NOTES_DIR") or (L.STATE / "notes"))
+    d = base / ck
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -173,7 +217,11 @@ class Ctx:
                     "SELECT v FROM meta WHERE k='coverage_cache'").fetchone()
                 if row:
                     rec = json.loads(row[0])
-                    if rec.get("stamp") == stamp:
+                    # The version guards the SHAPE of the cached dict, not the
+                    # index. A cache written before a field was added would
+                    # silently hide that field forever, because the index it
+                    # describes has not changed and the stamp still matches.
+                    if rec.get("stamp") == stamp and rec.get("v") == _COVERAGE_VERSION:
                         return rec["coverage"]
             except Exception:
                 pass
@@ -183,7 +231,8 @@ class Ctx:
                 self.shelf.execute("DELETE FROM meta WHERE k='coverage_cache'")
                 self.shelf.execute(
                     "INSERT INTO meta(k, v) VALUES('coverage_cache', ?)",
-                    (json.dumps({"stamp": stamp, "coverage": cov}),))
+                    (json.dumps({"stamp": stamp, "v": _COVERAGE_VERSION,
+                                 "coverage": cov}),))
                 self.shelf.commit()
             except Exception:
                 pass  # a read-only shelf must still answer, just slowly
@@ -191,6 +240,16 @@ class Ctx:
 
 
 _ctx_cache = {}
+
+
+def _update_in_progress(shelf_path):
+    """The marker c_shelf_update leaves for the duration of an update (see that file).
+
+    Reading a shelf mid-update is not a stale-read, it is a WRONG-read: cards_ids.jsonl and
+    cards.f16.npy are replaced one after the other, so between the two an id resolves to
+    another document's vector. Refusing beats answering from a half-replaced shelf.
+    """
+    return Path(shelf_path).parent / "UPDATE_IN_PROGRESS"
 
 
 def get_ctx(db_path, shelf_path, root=None):
@@ -208,24 +267,47 @@ def get_ctx(db_path, shelf_path, root=None):
 # one-time sequential pass records (rel -> start_id, end_id) once).
 # --------------------------------------------------------------------- #
 def _ensure_page_ranges(ctx):
+    """The rel -> rowid-range cache behind `open` and `inside`.
+
+    Rebuilt whenever the index changes. Ranges are keyed by rowid, so retrying a
+    file (or OCR-ing one) re-inserts its page rows at the end of the table and
+    every cached range for that rel becomes wrong: `open` would then return
+    another document's page, or nothing. The stamp is the same one the coverage
+    cache uses, so both caches agree on what "the index changed" means.
+    """
+    stamp = ctx._db_stamp()
     has = ctx.shelf.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='page_ranges'"
     ).fetchone()
     if has:
-        return
+        row = None
+        try:
+            row = ctx.shelf.execute(
+                "SELECT v FROM meta WHERE k='page_ranges_stamp'").fetchone()
+        except sqlite3.Error:
+            row = None
+        if row and row[0] == stamp:
+            return
+        ctx.shelf.execute("DROP TABLE page_ranges")
     print("(building page-range cache, one-time, ~1 min)", file=sys.stderr)
     ctx.shelf.execute("CREATE TABLE page_ranges(rel TEXT PRIMARY KEY, start_id INTEGER, end_id INTEGER)")
-    cur_rel, start_id, last_id = None, None, None
-    rows_out = []
+    # min/max rowid per rel, merged rather than one block per contiguous run: a
+    # re-indexed file can leave rows in two places, and the range query filters on
+    # both rel and page_index, so a wider range is correct -- just marginally slower.
+    ranges = {}
     for id_, c0 in ctx.db.execute("SELECT id, c0 FROM pages_content ORDER BY id"):
-        if c0 != cur_rel:
-            if cur_rel is not None:
-                rows_out.append((cur_rel, start_id, last_id))
-            cur_rel, start_id = c0, id_
-        last_id = id_
-    if cur_rel is not None:
-        rows_out.append((cur_rel, start_id, last_id))
-    ctx.shelf.executemany("INSERT INTO page_ranges VALUES (?,?,?)", rows_out)
+        r = ranges.get(c0)
+        if r is None:
+            ranges[c0] = [id_, id_]
+        else:
+            r[1] = id_
+    ctx.shelf.executemany("INSERT OR REPLACE INTO page_ranges VALUES (?,?,?)",
+                          [(rel, a, b) for rel, (a, b) in ranges.items()])
+    try:
+        ctx.shelf.execute("DELETE FROM meta WHERE k='page_ranges_stamp'")
+        ctx.shelf.execute("INSERT INTO meta(k, v) VALUES('page_ranges_stamp', ?)", (stamp,))
+    except sqlite3.Error:
+        pass
     ctx.shelf.commit()
 
 
@@ -236,8 +318,8 @@ def _load_doc_pages(ctx, rel):
         return []
     start_id, end_id = row
     return ctx.db.execute(
-        "SELECT c1, c2 FROM pages_content WHERE id BETWEEN ? AND ? ORDER BY id",
-        (start_id, end_id)).fetchall()
+        "SELECT c1, c2 FROM pages_content WHERE id BETWEEN ? AND ? AND c0=? ORDER BY id",
+        (start_id, end_id, rel)).fetchall()
 
 
 # --------------------------------------------------------------------- #
@@ -643,12 +725,37 @@ def _print_find(res, k):
 
 
 def _print_coverage(cov):
+    # Every failed_* status counts, not just two of them. index_build returns
+    # failed_timeout when pdftotext runs out of budget under worker contention;
+    # the old two-key sum hid that, so a build that dropped its largest volumes
+    # still printed failed=0 and the number was believed. Keep the COVERAGE token
+    # and the field order: c_selftest greps for the token.
     by = cov["by_status"]
-    failed = by.get("failed_encrypted", 0) + by.get("failed_parser", 0)
-    print(f"COVERAGE indexed={by.get('indexed', 0)} "
-          f"image_only_no_text={by.get('image_only_no_text', 0)} "
-          f"failed={failed} unsupported={by.get('unsupported_type', 0)} "
-          f"pages={cov['addressable_pages']}")
+    failed_by = {k: v for k, v in sorted(by.items()) if k.startswith("failed_")}
+    failed = sum(failed_by.values())
+    line = (f"COVERAGE indexed={by.get('indexed', 0)} "
+            f"image_only_no_text={by.get('image_only_no_text', 0)} "
+            f"failed={failed} unsupported={by.get('unsupported_type', 0)} "
+            f"pages={cov['addressable_pages']}")
+    if failed:
+        line += " failed_by={%s}" % ", ".join("%s:%d" % kv for kv in failed_by.items())
+    # Pages that were stored but carry no citable text. A file with a thin text
+    # layer is reported as `indexed` by index_build (one readable page is enough),
+    # so this is the only place its unreadable pages are visible at all.
+    thin = cov.get("thin_pages")
+    if thin:
+        line += f" pages_with_no_readable_text={thin}"
+        # Which files? A count alone is not actionable: 23 unreadable pages spread over one
+        # big scan and 23 spread over 23 documents call for different responses (re-OCR one
+        # file vs check the whole corpus). Top offenders only, so the line stays readable;
+        # the full list is in `coverage --json`.
+        worst = cov.get("thin_by_file") or []
+        if worst:
+            top = ", ".join("%s %d/%d" % (Path(w["rel"]).name[:28], w["thin_pages"],
+                                          w["pages"]) for w in worst[:5])
+            more = "" if len(worst) <= 5 else " (+%d more)" % (len(worst) - 5)
+            line += f" worst=[{top}{more}]"
+    print(line)
 
 
 # --------------------------------------------------------------------- #
@@ -1108,6 +1215,99 @@ def do_tables(ctx, rel, grep=None):
     return {"rel": rel, "captions": [{"page_index": p, "caption": c} for p, c in rows]}
 
 
+def _pdf_path(ctx, rel):
+    """The PDF on disk for an indexed rel, or None if it cannot be found.
+
+    Every other command answers from the index, which is why the corpus can move without
+    the index breaking. This one needs the actual file, because the index holds a page's
+    TEXT LAYER and its caption lines -- not a table's cells as cells.
+    """
+    root = getattr(ctx, "root", None)
+    if not root:
+        return None
+    direct = Path(root) / rel
+    if direct.exists():
+        return direct
+    # ponytail: one walk of the corpus tree, only when the direct join misses (a rel whose
+    # separators or case differ from the tree on disk). Cache rel -> path if this ever gets
+    # called in a loop.
+    name = Path(rel).name.lower()
+    for cand in Path(root).rglob("*"):
+        if cand.is_file() and cand.name.lower() == name:
+            return cand
+    return None
+
+
+def do_table(ctx, rel, page_index, max_rows=60):
+    """Read the table on a page from the PDF's own layout, cell by cell.
+
+    `tables` lists the table CAPTIONS the index found; `open` shows the page's text layer,
+    which lays a table out as loose lines with the columns run together. When the question
+    is the value in a particular cell, this reads the grid: pdfplumber's line-based
+    detection needs the file on disk, so it works only while the corpus is there.
+
+    The cells are NOT a citation. The note guard checks a quote against the index's page
+    text, and a cell read from the layout may be absent from that text -- so evidence still
+    has to come from open + note, and the guard is right to refuse a cell the text layer
+    does not contain.
+    """
+    out = {"rel": rel, "page_index": page_index, "tables": [], "n_tables": 0}
+    path = _pdf_path(ctx, rel)
+    if path is None:
+        out["error"] = "PDF_NOT_ON_DISK"
+        out["hint"] = ("the index answers without the corpus, but a table has to be read "
+                       "from the file; the corpus root for this index is %r"
+                       % getattr(ctx, "root", None))
+        return out
+    try:
+        import pdfplumber
+    except ImportError:
+        out["error"] = "PDFPLUMBER_MISSING"
+        out["hint"] = "pip install pdfplumber -- or use `open` for the text layer"
+        return out
+    # pdfplumber's page list is 0-based; the index's numbering lives in labpaths.
+    idx = L.pdf_page_number(page_index) - 1
+    with pdfplumber.open(str(path)) as pdf:
+        out["n_pages_in_pdf"] = len(pdf.pages)
+        if idx < 0 or idx >= len(pdf.pages):
+            out["error"] = "PAGE_OUT_OF_RANGE"
+            return out
+        page = pdf.pages[idx]
+        raw = page.extract_tables() or []
+    for t in raw:
+        rows = [] if t is None else t
+        clean = [[" ".join((c or "").split())[:120] for c in row] for row in rows]
+        clean = [r for r in clean if any(r)]
+        if clean:
+            out["tables"].append({"n_rows": len(clean),
+                                  "n_cols": max(len(r) for r in clean),
+                                  "rows": clean[:max_rows]})
+    out["n_tables"] = len(out["tables"])
+    out["pdf_path"] = str(path)
+    return out
+
+
+def _print_table(res):
+    if res.get("error"):
+        print(f"TABLE_ERROR {res['error']}  {res['rel']} p{res['page_index']}")
+        if res.get("hint"):
+            print(f"  {res['hint']}")
+        return
+    if not res["n_tables"]:
+        print(f"TABLE_NONE {res['rel']} p{res['page_index']} -- no table detected on this "
+              f"page ({res.get('n_pages_in_pdf')} pages in the file).")
+        print("  A borderless table often reads as text: use "
+              f"`open \"{res['rel']}\" {res['page_index']}`.")
+        return
+    print(f"TABLE {res['rel']} p{res['page_index']} tables={res['n_tables']}")
+    for n, t in enumerate(res["tables"], 1):
+        print(f"  [table {n}] {t['n_rows']} rows x {t['n_cols']} cols")
+        for row in t["rows"]:
+            print("   | " + " | ".join(row) + " |")
+    print("  (read from the PDF's layout. To cite a figure, `open` the page and `note` the "
+          "line -- the guard checks quotes against the index's text layer, not this.)")
+
+
 def _print_tables(res):
     for c in res["captions"]:
         print(f"  p{c['page_index']}  {c['caption']}")
@@ -1223,15 +1423,62 @@ def _print_exact(res):
             print(f"  {rel}  pages={pages}")
 
 
-def do_open(ctx, rel, page_index, slug=None):
-    # Phase 9.1.1: `SELECT body FROM pages WHERE rel=? AND page_index=?` is a full
-    # scan of 1.2M rows -- `rel` is UNINDEXED in the FTS5 table -- which cost ~7.5s
-    # on EVERY open, and a trajectory session issues a dozen of them. The shelf
-    # already caches (rel -> contiguous rowid block) in page_ranges for `inside`,
-    # so the same range turns the scan into a rowid lookup. Rank-preserving by
-    # construction: same row, same bytes (verified byte-identical on 300 pages by
-    # bin/c_open_equiv_check.py). The original query stays as the fallback so any
-    # rel absent from the cache behaves exactly as before.
+# _THIN_CHARS is imported from corpus_search: the coverage count and the citation
+# warnings must agree on what "no readable text" means.
+
+# The citation tail CLAUDE.md asks for: `<verbatim line> | <path> | p<page>`.
+_ELISION_RE = re.compile(r"\.{3,}|\u2026")
+
+
+def _norm_ws(s):
+    """Whitespace-insensitive form. The page text is laid out with columns of
+    spaces and the model copies it back with whatever spacing it got, so the
+    comparison must not depend on that."""
+    return re.sub(r"\s+", " ", s or "").strip().lower()
+
+
+def _quote_chunks(quote):
+    """Split a quote on elision marks; every chunk is then checked on its own,
+    so `a ... b` requires both a and b to be on the page. A chunk is kept when
+    it is 6+ characters, or 3+ and contains a digit -- a bare figure is exactly
+    what an invented note fabricates, so short numeric chunks are checked too.
+    ponytail: chunk >=3 chars is the floor; a two-digit number is too weak a
+    signal to match anything. Raise it if honest notes start getting refused."""
+    out = []
+    for c in (_norm_ws(x) for x in _ELISION_RE.split(quote or "")):
+        if len(c) >= 6 or (len(c) >= 3 and any(ch.isdigit() for ch in c)):
+            out.append(c)
+    return out
+
+
+def _quote_on_page(quote, body):
+    """(ok, missing_chunk). Presence, not attribution: this proves the quoted
+    text IS on the page, which is what stops an invented line being recorded.
+    It cannot prove the figure sits in the row the answer says it does -- the
+    limits of a substring check, stated rather than papered over."""
+    nb = _norm_ws(body)
+    for c in _quote_chunks(quote):
+        if c not in nb:
+            return False, c
+    return True, None
+
+
+def _page_body(ctx, rel, page_index):
+    """The stored text of one page, or None when the index has no such page.
+
+    Extracted from do_open unchanged so that open, note and verify fetch a page
+    through ONE path: the string a model quotes is the string the tool checks.
+    A second copy of this query would let the guard and the citation drift apart.
+
+    Phase 9.1.1: `SELECT body FROM pages WHERE rel=? AND page_index=?` is a full
+    scan of 1.2M rows -- `rel` is UNINDEXED in the FTS5 table -- which cost ~7.5s
+    on EVERY open, and a trajectory session issues a dozen of them. The shelf
+    already caches (rel -> contiguous rowid block) in page_ranges for `inside`,
+    so the same range turns the scan into a rowid lookup. Rank-preserving by
+    construction: same row, same bytes (verified byte-identical on 300 pages by
+    bin/c_open_equiv_check.py). The original query stays as the fallback so any
+    rel absent from the cache behaves exactly as before.
+    """
     row = None
     try:
         _ensure_page_ranges(ctx)
@@ -1239,16 +1486,109 @@ def do_open(ctx, rel, page_index, slug=None):
             "SELECT start_id, end_id FROM page_ranges WHERE rel=?", (rel,)).fetchone()
         if rng:
             row = ctx.db.execute(
-                "SELECT c2 FROM pages_content WHERE id BETWEEN ? AND ? AND c1=?",
-                (rng[0], rng[1], page_index)).fetchone()
+                "SELECT c2 FROM pages_content WHERE id BETWEEN ? AND ? AND c0=? AND c1=?",
+                (rng[0], rng[1], rel, page_index)).fetchone()
     except Exception:
         row = None
     if row is None:
         row = ctx.db.execute("SELECT body FROM pages WHERE rel=? AND page_index=?",
                              (rel, page_index)).fetchone()
-    if not row:
+    return row[0] if row else None
+
+
+def _page_sha(body):
+    """A short content stamp for a page, so a note can be checked against the page as it
+    was when the note was written (see do_verify's PAGE_CHANGED_SINCE_NOTE)."""
+    return hashlib.sha256((body or "").encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+# --------------------------------------------------------------------- #
+# answer numbers
+#
+# The note guard proves a QUOTE is on a page. Nothing tied the FIGURES IN THE ANSWER to
+# those quotes, so an answer could quote correctly and then write a different number in its
+# prose -- the one remaining way to be wrong while every check passes. These helpers look at
+# an answer's text and ask, for each number it states, whether some note's quote contains
+# that number.
+#
+# What is deliberately NOT checked, because flagging it produces noise that gets the check
+# ignored:
+#   * a four-digit year (1900-2099): a time reference, not a figure
+#   * a single digit: page counts, "two years", list numbering
+#   * anything inside a citation tail or a `p12`: the answer's own provenance, not a claim
+# --------------------------------------------------------------------- #
+_NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_TAIL_STRIP_RE = re.compile(r"\|[^|\n]*\|\s*p\d+\b|\bp\d+\b", re.I)
+# A fiscal-year token is a time reference, and its second half is not a figure: "2024-25"
+# would otherwise leave "25" looking like a claim the notes never made.
+_FY_STRIP_RE = re.compile(r"\b(?:19|20)\d\d\s*[-/]\s*\d\d\b")
+
+
+def _canon_number(tok):
+    """1,234.50 -> 1234.50. Comparing the digits is what lets "Rs. 1,234 mn" answer a quote
+    that prints "1,234"."""
+    return tok.replace(",", "").rstrip(".")
+
+
+def _numbers_in(text):
+    """The figures a piece of prose states. Fiscal years are removed first (see
+    _FY_STRIP_RE), and this is a SCANNER: it does not strip citation tails, because what
+    counts as a claim depends on the answer's tails being removed first -- that is
+    check_answer_numbers, which is what a caller wants."""
+    out = []
+    for m in _NUM_RE.finditer(_FY_STRIP_RE.sub(" ", text or "")):
+        tok, canon = m.group(0), _canon_number(m.group(0))
+        if not canon or canon.endswith("."):
+            continue
+        digits = canon.replace(".", "")
+        if len(digits) < 2:                      # a single digit is not a figure
+            continue
+        if len(digits) == 4 and digits.isdigit() and 1900 <= int(digits) <= 2099:
+            continue                             # a year
+        out.append((tok, canon))
+    return out
+
+
+def _quote_numbers(quote):
+    """The canonical numbers a quote contains, as whole tokens.
+
+    Matching is on token boundaries: a quote holding "2018-19" must not be read as support
+    for the figure 18.
+    """
+    return {_canon_number(m.group(0)) for m in _NUM_RE.finditer(quote or "")}
+
+
+def check_answer_numbers(answer_text, notes):
+    """Each number the answer states, and whether a note's quote contains it.
+
+    Rounding and unit restatement are the innocent causes of a miss ("610.5 million" for a
+    quote that prints 610.456), which is why the verdict names the figure and the quotes
+    checked instead of just failing.
+    """
+    quoted = []
+    for n in notes:
+        q = n.get("quote")
+        if not q:                      # an older note: fall back to the text before the tail
+            m = _NOTE_TAIL_RE.search(n.get("text") or "")
+            q = (n.get("text") or "")[:m.start()] if m else (n.get("text") or "")
+        quoted.append((n.get("text", "")[:60], _quote_numbers(q)))
+    prose = _TAIL_STRIP_RE.sub(" ", answer_text or "")
+    out, seen = [], set()
+    for tok, canon in _numbers_in(prose):
+        if canon in seen:
+            continue
+        seen.add(canon)
+        where = [t for t, nums in quoted if canon in nums]
+        out.append({"figure": tok, "canonical": canon, "supported": bool(where),
+                    "in_notes": where[:3]})
+    return out
+
+
+def do_open(ctx, rel, page_index, slug=None):
+    body = _page_body(ctx, rel, page_index)
+    if body is None:
         return {"rel": rel, "page_index": page_index, "found": False}
-    body = row[0][:12000]
+    body = body[:12000]
     if slug:
         nd = _notes_dir(ctx.root)
         log = nd / f"{slug}_opened.jsonl"
@@ -1261,8 +1601,21 @@ def do_open(ctx, rel, page_index, slug=None):
 def _print_open(res):
     if not res["found"]:
         print(f"NO SUCH PAGE: {res['rel']} page {res['page_index']}")
+        print("  (no such page in the index -- the file may have failed extraction, "
+              "or that page carries no text layer. Run `coverage`.)")
         return
-    print(f"OPENED {res['rel']} p{res['page_index']}")
+    # The citation tail carries the INDEX's page number (`p<page_index>`) -- what `open`
+    # takes and what the note guard checks. When the index numbers its pages from 1 that
+    # number IS the PDF page a reader opens, so nothing more needs saying; with an older
+    # 0-based index the PDF page is printed beside it, because a citation a human cannot
+    # find on the page they open is not a citation they can check.
+    pdf_page = L.pdf_page_number(res["page_index"])
+    where = f" (PDF page {pdf_page})" if pdf_page != res["page_index"] else ""
+    print(f"OPENED {res['rel']} p{res['page_index']}{where}")
+    if len(res["body"].strip()) < _THIN_CHARS:
+        print(f"PAGE_HAS_NO_READABLE_TEXT ({len(res['body'].strip())} chars) -- a scan or "
+              f"a blank page. It cannot support a citation; say the page is unreadable "
+              f"rather than quoting it.")
     print(res["body"])
 
 
@@ -1279,8 +1632,9 @@ def do_note(ctx, slug, text):
     enforce is a suggestion.
 
     So: the note must carry the `| <path> | p<n>` tail the policy already
-    prescribes, and that (path, page) must appear in this slug's own
-    `_opened.jsonl`. Nothing is recorded when it does not.
+    prescribes, that (path, page) must appear in this slug's own
+    `_opened.jsonl`, and the quoted text must actually occur on that page.
+    Nothing is recorded when any of the three fails.
 
     Path comparison is by the last two segments, lowercased, matching
     scoring.py's rule -- the agent quotes the path as `find` printed it, and
@@ -1292,10 +1646,6 @@ def do_note(ctx, slug, text):
     cited_path = m.group("path").strip().strip('"\'')
     cited_page = int(m.group("page"))
 
-    def tail2(s):
-        segs = [x for x in str(s).replace("\\", "/").lower().split("/") if x]
-        return "/".join(segs[-2:])
-
     nd = _notes_dir(ctx.root)
     opened_log = nd / f"{slug}_opened.jsonl"
     opened = []
@@ -1305,15 +1655,36 @@ def do_note(ctx, slug, text):
                 opened.append(json.loads(line))
             except Exception:
                 pass
-    want = tail2(cited_path)
-    if not any(o.get("page_index") == cited_page and tail2(o.get("rel")) == want
-               for o in opened):
+    want = _tail2(cited_path)
+    match = next((o for o in opened
+                  if o.get("page_index") == cited_page and _tail2(o.get("rel")) == want), None)
+    if match is None:
         return {"ok": False, "error": "NOTE_REFUSED_PAGE_NOT_OPENED",
                 "path": cited_path, "page_index": cited_page}
 
+    # Opening a page is not the same as quoting it. Until now this function
+    # checked the (path, page) tail and nothing else, so a note could satisfy the
+    # guard by opening page 7 and then carry a figure that is on page 9, or on no
+    # page at all -- the guard proved an open, never the quote. The page body is
+    # one call away, so the quote is now checked against it and refused if absent.
+    quote = text[:m.start()].strip().strip("|\"' ")
+    if not _quote_chunks(quote):
+        return {"ok": False, "error": "NOTE_REFUSED_NO_QUOTE",
+                "path": match.get("rel"), "page_index": cited_page}
+    body = _page_body(ctx, match.get("rel"), cited_page)
+    if body is None:
+        return {"ok": False, "error": "NOTE_REFUSED_PAGE_NOT_IN_INDEX",
+                "path": match.get("rel"), "page_index": cited_page}
+    ok, missing = _quote_on_page(quote, body)
+    if not ok:
+        return {"ok": False, "error": "NOTE_REFUSED_QUOTE_NOT_ON_PAGE",
+                "path": match.get("rel"), "page_index": cited_page,
+                "quoted": quote[:200], "missing": missing}
+
     log = nd / f"{slug}_notes.jsonl"
     with open(log, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"text": text, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}) + "\n")
+        fh.write(json.dumps({"text": text, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                             "page_sha": _page_sha(body), "quote": quote[:200]}) + "\n")
     return {"ok": True}
 
 
@@ -1336,6 +1707,132 @@ def _print_notes(res):
     print(f"notes ({len(res['notes'])}):")
     for n in res["notes"]:
         print(f"  {n['text']}  ({n['ts']})")
+
+
+def _tail2(s):
+    """Last two path segments, lowercased. How scoring.py and the note guard
+    compare a cited path against an indexed one, hoisted to module level so the
+    write-time guard and `verify` compare paths by exactly the same rule."""
+    segs = [x for x in str(s).replace("\\", "/").lower().split("/") if x]
+    return "/".join(segs[-2:])
+
+
+def _resolve_rel(ctx, cited_path):
+    """The indexed rel a citation's path refers to, matched on the last two path
+    segments the way scoring.py and the note guard do, so a citation written from
+    a printed path resolves to the same file the index holds.
+
+    ponytail: one pass over files per call. At 15k files that is a 15k-row scan
+    per verify, which is nothing next to the pass itself; index it if verify ever
+    runs per-answer in a loop."""
+    want = _tail2(cited_path)
+    for (rel,) in ctx.db.execute("SELECT rel FROM files"):
+        if _tail2(rel) == want:
+            return rel
+    return None
+
+
+def do_verify(ctx, slug, answer_path=None):
+    """Re-derive every note of a slug from the index alone.
+
+    `notes` prints what was written. This asks the index instead: does the cited
+    file exist, does that page exist, and does the quoted text occur on it? It
+    uses the same `_quote_on_page` as the write-time guard, so a note cannot pass
+    here by being checked differently. Exit code is non-zero on any failure, which
+    is what lets a handover be gated on it.
+
+    With `answer_path`, every figure the answer states is also checked against the
+    notes' quotes: a correct quote next to a different number in the prose is the one
+    way left to be wrong with every other check passing.
+    """
+    res = do_notes(ctx, slug)
+    checks = []
+    for n in res["notes"]:
+        text = n.get("text", "")
+        m = _NOTE_TAIL_RE.search(text or "")
+        if not m:
+            checks.append({"text": text, "ok": False, "error": "NO_CITATION_TAIL"})
+            continue
+        cited = m.group("path").strip().strip("\"' ")
+        page = int(m.group("page"))
+        rel = _resolve_rel(ctx, cited)
+        if rel is None:
+            checks.append({"text": text, "ok": False, "error": "CITED_FILE_NOT_IN_INDEX",
+                           "path": cited, "page_index": page})
+            continue
+        body = _page_body(ctx, rel, page)
+        if body is None:
+            checks.append({"text": text, "ok": False, "error": "CITED_PAGE_NOT_IN_INDEX",
+                           "path": rel, "page_index": page})
+            continue
+        ok, missing = _quote_on_page(text[:m.start()], body)
+        note_sha = n.get("page_sha")
+        now_sha = _page_sha(body)
+        if not ok and note_sha and note_sha != now_sha:
+            # The note recorded the page's content when it was written. If that content has
+            # changed, a missing quote means "the index moved under this citation", not "the
+            # answer made it up" -- two different problems with two different fixes.
+            checks.append({"text": text, "ok": False, "error": "PAGE_CHANGED_SINCE_NOTE",
+                           "path": rel, "page_index": page, "missing": missing,
+                           "page_sha": note_sha, "page_sha_now": now_sha})
+            continue
+        if not ok:
+            checks.append({"text": text, "ok": False, "error": "QUOTE_NOT_ON_PAGE",
+                           "path": rel, "page_index": page, "missing": missing})
+            continue
+        checks.append({"text": text, "ok": True, "path": rel, "page_index": page,
+                       "page_chars": len(body.strip()),
+                       "page_changed": bool(note_sha and note_sha != now_sha)})
+    n_bad = sum(1 for c in checks if not c["ok"])
+    out = {"slug": slug, "n_notes": len(checks), "n_bad": n_bad, "checks": checks}
+    if answer_path:
+        try:
+            text = Path(answer_path).read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            out["answer"] = {"path": answer_path, "error": type(e).__name__}
+            out["n_bad_answer"] = 1
+            return out
+        claims = check_answer_numbers(text, res["notes"])
+        unsupported = [c for c in claims if not c["supported"]]
+        out["answer"] = {"path": answer_path, "figures": claims,
+                         "unsupported": unsupported}
+        out["n_bad_answer"] = len(unsupported)
+    return out
+
+
+def _print_verify(res):
+    print(f"VERIFY slug={res['slug']} notes={res['n_notes']} failed={res['n_bad']}")
+    for c in res["checks"]:
+        if c["ok"]:
+            warn = "  page text changed since the note" if c.get("page_changed") else ""
+            print(f"  OK   p{c['page_index']} ({c['page_chars']} chars)  {c['path']}{warn}")
+        else:
+            extra = f"  missing={c['missing']!r}" if c.get("missing") else ""
+            if c["error"] == "PAGE_CHANGED_SINCE_NOTE":
+                extra = (f"  page was {c['page_sha']} when noted, now {c['page_sha_now']} "
+                         f"-- re-indexed since; re-make this note from the current page")
+            print(f"  FAIL {c['error']}  {c.get('path', '?')} p{c.get('page_index', '?')}{extra}")
+    if res["n_bad"]:
+        print("VERIFY_FAILED -- do not hand over an answer built on these notes")
+    elif res["n_notes"]:
+        print("VERIFY_OK -- every note's quote is on the page it cites")
+    else:
+        print("VERIFY_EMPTY -- no notes for this slug; nothing was cited")
+    if "answer" in res:
+        a = res["answer"]
+        if a.get("error"):
+            print(f"ANSWER_UNREADABLE {a['error']}  {a['path']}")
+            return
+        figs = a["figures"]
+        print(f"ANSWER_NUMBERS {a['path']} figures={len(figs)} "
+              f"unsupported={len(a['unsupported'])}")
+        for c in a["unsupported"]:
+            print(f"  NOT IN ANY NOTE QUOTE: {c['figure']}  (rounding or a restated unit is "
+                  f"the usual innocent cause -- check it, then cite it)")
+        if a["unsupported"]:
+            print("ANSWER_UNSUPPORTED_FIGURES -- a figure the notes do not contain")
+        elif figs:
+            print("ANSWER_OK -- every figure the answer states appears in a note's quote")
 
 
 def do_coverage(ctx):
@@ -1372,6 +1869,8 @@ def main():
     # Python default stays None so every recorded number reproduces with explicit flags
 
     p = sub.add_parser("tables"); p.add_argument("rel"); p.add_argument("--grep")
+    p = sub.add_parser("table"); p.add_argument("rel"); p.add_argument("--page", type=int, required=True)
+    p.add_argument("--max-rows", type=int, default=60)
 
     p = sub.add_parser("series"); p.add_argument("row_words"); p.add_argument("--family", required=True)
     p.add_argument("--from", dest="fy_from"); p.add_argument("--to", dest="fy_to"); p.add_argument("--slug")
@@ -1389,8 +1888,13 @@ def main():
     p = sub.add_parser("note"); p.add_argument("--slug", required=True); p.add_argument("text")
 
     p = sub.add_parser("notes"); p.add_argument("--slug", required=True)
+    p = sub.add_parser("verify"); p.add_argument("--slug", required=True)
+    p.add_argument("--answer", help="also check every figure in this answer file against "
+                                    "the notes' quotes")
 
-    sub.add_parser("coverage")
+    p = sub.add_parser("coverage")
+    p.add_argument("--json", dest="as_json", action="store_true",
+                   help="the whole coverage dict, including every file's thin-page count")
 
     p = sub.add_parser("register"); p.add_argument("--root", required=True)
     p.add_argument("--db", dest="reg_db", required=True); p.add_argument("--shelf", dest="reg_shelf", required=True)
@@ -1404,6 +1908,12 @@ def main():
         print(json.dumps(r, indent=1)); return
 
     root, db, shelf = _resolve(a.db, a.shelf)
+    if not str(shelf).endswith(":memory:") and _update_in_progress(shelf).exists():
+        print("SHELF_UPDATE_IN_PROGRESS %s\n  this shelf is being updated right now; an "
+              "answer taken now could cite the wrong document. Wait for c_shelf_update.py "
+              "to finish, or re-run it if it was interrupted."
+              % _update_in_progress(shelf), file=sys.stderr)
+        sys.exit(3)
     if not db or not shelf:
         print("NO_REGISTERED_ROOT", file=sys.stderr); sys.exit(2)
     ctx = get_ctx(db, shelf, root)
@@ -1432,6 +1942,9 @@ def main():
     elif a.cmd == "tables":
         res = do_tables(ctx, a.rel, grep=a.grep)
         _print_tables(res)
+    elif a.cmd == "table":
+        res = do_table(ctx, a.rel, a.page, max_rows=a.max_rows)
+        _print_table(res)
     elif a.cmd == "series":
         res = do_series(ctx, a.row_words, a.family, fy_from=a.fy_from, fy_to=a.fy_to,
                         caption_channel=None if a.caption == "off" else a.caption)
@@ -1448,9 +1961,20 @@ def main():
     elif a.cmd == "note":
         r = do_note(ctx, a.slug, a.text)
         if not r.get("ok"):
-            if r["error"] == "NOTE_REFUSED_PAGE_NOT_OPENED":
-                print("NOTE_REFUSED_PAGE_NOT_OPENED %s p%d"
+            err = r["error"]
+            if err == "NOTE_REFUSED_PAGE_NOT_OPENED":
+                print("NOTE_REFUSED_PAGE_NOT_OPENED %s p%d -- open that page first"
                       % (r["path"], r["page_index"]), file=sys.stderr)
+            elif err == "NOTE_REFUSED_PAGE_NOT_IN_INDEX":
+                print("NOTE_REFUSED_PAGE_NOT_IN_INDEX %s p%d -- the index holds no such page"
+                      % (r["path"], r["page_index"]), file=sys.stderr)
+            elif err == "NOTE_REFUSED_QUOTE_NOT_ON_PAGE":
+                print("NOTE_REFUSED_QUOTE_NOT_ON_PAGE %s p%d -- this text is not on that "
+                      "page: %r" % (r["path"], r["page_index"], r.get("missing")),
+                      file=sys.stderr)
+            elif err == "NOTE_REFUSED_NO_QUOTE":
+                print("NOTE_REFUSED_NO_QUOTE -- a note is `<verbatim line> | <path> | p<n>`; "
+                      "the quoted line is what gets checked", file=sys.stderr)
             else:
                 print("NOTE_REFUSED_NO_CITATION", file=sys.stderr)
             sys.exit(3)
@@ -1458,8 +1982,17 @@ def main():
     elif a.cmd == "notes":
         res = do_notes(ctx, a.slug)
         _print_notes(res)
+    elif a.cmd == "verify":
+        res = do_verify(ctx, a.slug, answer_path=a.answer)
+        _print_verify(res)
+        if res["n_bad"] or res.get("n_bad_answer"):
+            sys.exit(1)
     elif a.cmd == "coverage":
-        _print_coverage(do_coverage(ctx))
+        cov = do_coverage(ctx)
+        if getattr(a, "as_json", False):
+            print(json.dumps(cov, indent=1))
+        else:
+            _print_coverage(cov)
     else:
         ap.print_usage(); sys.exit(2)
 

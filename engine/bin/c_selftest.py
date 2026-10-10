@@ -165,19 +165,29 @@ def main():
         for f in (nd / (slug + "_notes.jsonl"), nd / (slug + "_opened.jsonl")):
             if f.exists():
                 f.unlink()
-        tail = ' | %s | p0' % target_rel
+        tail = ' | %s | p%d' % (target_rel, CSH.L.FIRST_PAGE_INDEX)
         r_no_tail = CSH.do_note(ctx, slug, "no citation here")
         r_before = CSH.do_note(ctx, slug, "line" + tail)
         recorded_before = (nd / (slug + "_notes.jsonl")).exists()
-        CSH.do_open(ctx, target_rel, 0, slug=slug)
-        r_after = CSH.do_note(ctx, slug, "line" + tail)
+        op = CSH.do_open(ctx, target_rel, CSH.L.FIRST_PAGE_INDEX, slug=slug)
+        # The quote has to be text that is actually on the page. It used to be the
+        # literal placeholder "line", which the guard accepted because the guard
+        # checked only that the page had been opened. It checks the quote now, so
+        # the fixture is a real line -- plus an invented one, which must be refused
+        # even on a page that was opened properly.
+        real = next((l.strip() for l in (op.get("body") or "").splitlines()
+                     if len(l.strip()) >= 12 and "|" not in l), "")
+        r_after = CSH.do_note(ctx, slug, (real or "line") + tail)
+        r_invented = CSH.do_note(ctx, slug, "999,999 of invented spending" + tail)
         results["note_requires_open"] = {
             "pass": (r_no_tail.get("error") == "NOTE_REFUSED_NO_CITATION"
                      and r_before.get("error") == "NOTE_REFUSED_PAGE_NOT_OPENED"
                      and not recorded_before
-                     and r_after.get("ok") is True),
+                     and r_after.get("ok") is True
+                     and r_invented.get("error") == "NOTE_REFUSED_QUOTE_NOT_ON_PAGE"),
             "no_tail": r_no_tail.get("error"), "before_open": r_before.get("error"),
             "recorded_before_open": recorded_before, "after_open_ok": r_after.get("ok"),
+            "invented": r_invented.get("error"),
         }
         for f in (nd / (slug + "_notes.jsonl"), nd / (slug + "_opened.jsonl")):
             if f.exists():

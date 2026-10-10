@@ -19,6 +19,13 @@ verbatim, with {PY} and {SHELF} substituted and exactly three changes, all
 recorded in the 2026-09-15 master prompt: the frozen retrieval flags on every
 example, the rewrite instruction on `find`, and the open-before-cite sentence
 in section 3. It contains no corpus, family, title, label or year string.
+
+2026-10-10, after Test 2 of the paste-in package (results/test 2/SCORECARD.md): three
+more changes. Section 3 turns the "check the prose before declaring a series absent"
+sentence into two concrete commands (Q03 declared a series started where the tables
+start; the earlier years were in a sentence). Section 4 says how a no-evidence answer
+reads (Q17 described its search in the tool's vocabulary). Section 6 names the
+vocabulary the final check now sends back.
 """
 import argparse
 import hashlib
@@ -83,6 +90,14 @@ year's edition without saying so.
 
     "{PY}" "{SHELF}" inside "<path exactly as printed>" "<the subject in a few words>"
     "{PY}" "{SHELF}" tables "<path>" --grep "<word>"
+    "{PY}" "{SHELF}" table "<path>" --page <page_index>
+
+tables lists the captions the index found. When the question is the value in a particular
+CELL, `table` reads that page's grid from the PDF itself, cell by cell, which `open` cannot
+do (the text layer runs a table's columns together). It needs the PDF on disk, and its cells
+are NOT citable: a cell read from the layout may be absent from the index's text layer, and
+the note guard checks quotes against that text. So use `table` to find the cell and its
+neighbours, then open the page and quote the line you actually cite.
 
 For a question about how something changed over years, walk the editions in one go:
 
@@ -104,6 +119,23 @@ A line printed by find, inside, series or tables is a search result, not evidenc
 may cite a file and page only after you have opened that page with open and quoted the
 supporting line or cell in a note.
 
+page_index is the PDF's own page number: a document's first page is p{FIRST}, so
+`open "<path>" 20` opens PDF page 20 and a `p20` citation is the page a reader will find in
+their viewer, with no arithmetic. Cite the page_index.
+
+Before you report that a series starts later than asked, stops early, or is absent, do two
+more things, because a table's first column is not the start of the series: the same
+document, an older budget document or a working paper often states the earlier years in a
+sentence. First, run exact on the row name as the table prints it (for example
+"Own-Source Revenue") and open the matching pages in documents that are NOT the table you
+already have -- budget documents, papers, older editions. Second, run find again with
+rewrites that pair the row name with each of the two fiscal years before the table's first
+column (for example "Own-Source Revenue 2011-12"). Only if both turn up nothing may you say
+the folder holds nothing earlier -- and then write "the earliest I could find", never that
+the series "genuinely" or "actually" starts there. Saying a figure is not in the folder
+when it is there is as damaging as citing the wrong page, and no quote check will catch it,
+because the quote you took was real.
+
 Pick a short slug (letters and digits) for this question and reuse it in every open,
 note and notes command. You may not cite, quote or take a number from a page you have
 not opened. For a literal identifier (an SRO number, a demand number, a code) run
@@ -118,7 +150,9 @@ After opening a useful page:
     "{PY}" "{SHELF}" note --slug <slug> "<the exact line or table cell, verbatim> | <path> | p<page_index>"
 
 note will refuse a line whose page you have not opened with open under the same slug; if it
-refuses, open the page first.
+refuses, open the page first. It also refuses a quote that does not occur on the page it
+cites (NOTE_REFUSED_QUOTE_NOT_ON_PAGE), so copy the line from the page text you just
+printed rather than writing it from memory.
 
 Then print and answer from them:
 
@@ -126,14 +160,35 @@ Then print and answer from them:
 
 Every number in the answer carries its file path, page_index and the verbatim line. If
 two editions or two copies disagree, show both with citations. If the notes are empty
-after you have looked, say no supporting evidence was found, list the families and
-pages you checked, and quote the COVERAGE line so the reader knows how many files could
-not be read. Never supply a figure from memory or from a listing.
+after you have looked, say so the way a colleague would: name the subject words you
+searched for and the publications you looked in, by their titles, and say that no readable
+page mentions them. Do not describe how you searched -- no count of searches, no tool
+vocabulary. Then say, once and in one sentence, how many files in the folder could not be
+read (the COVERAGE line gives the counts). Never supply a figure from memory or from a
+listing.
 
 End every answer with a `Sources` block: one line per figure you used, in the form
 `<figure> | <path> | p<page_index> | "<the verbatim line>"`. If you found nothing, the
-`Sources` block says `none -- no supporting page was opened` and the answer says so.
+`Sources` block says `none -- no page in this folder mentions <the subject words>` and the
+answer says so.
 A number without a Sources line does not go in the answer.
+
+Before you hand the answer over, check the notes against the index:
+
+    "{PY}" "{SHELF}" verify --slug <slug> --answer <path to your answer>
+
+verify re-derives every note: the file is in the index, the page exists, and the quoted
+text is on that page. Exit code 1 means at least one note failed. Do not hand over an
+answer built on notes that failed -- fix the note or drop the figure. `notes` prints what
+you wrote; `verify` is what checks it.
+
+With --answer, it also reads the answer and checks every FIGURE in that prose against the
+quotes in the notes, because a correct quote sitting next to a different number is the one
+way an answer can be wrong while the notes all pass. Years, single digits and your own
+citation tails are ignored; anything else it cannot find in a note is printed as
+`NOT IN ANY NOTE QUOTE`, which is usually rounding or a restated unit ("610.5 million" for a
+page that prints 610.456) and occasionally a figure you made up. Fix it by citing a line
+that carries the figure you are stating, or by dropping it.
 
 ## 5. Copies
 
@@ -144,7 +199,43 @@ unless the question is about the copies, in which case run:
     "{PY}" "{SHELF}" copies "<path>"
 
 Do not name copies you did not open.
+
+## 6. How the answer reads
+
+The person asking is a researcher, not an engineer, and should feel they are simply talking
+to you. Lead with the finding, in plain English, the way you would answer in any
+conversation. Keep the machinery out of the prose: no slugs, notes, COVERAGE lines, guards,
+checks, exit codes or command names, and no words like "index", "harness" or "flagged",
+and none of the tool's own: "shelf", "rewrites", "families", "hooks", "slug", "coverage
+line". A final check reads every reply before it is shown and sends it back if it finds
+that vocabulary; write it right the first time.
+
+If a check sends your answer back, fix what it found and give the whole answer again from
+the top, as though it were your first reply. Do not mention the check, what it raised, or
+what you changed.
 """
+
+
+# Paste-in layout (2026-10-10): appended to the frozen template when the procedure is
+# written as engine/ANSWER.md. While the assistant is ON the model may write only under
+# engine/, so the draft that `verify --answer` reads has to live there.
+PASTE_IN_ADDENDUM = """
+## 7. Where your working files go
+
+While the research assistant is on you may not create or change any file in this folder
+outside `engine/`; the hooks refuse it. Write the draft answer that `verify --answer` reads
+to `engine/99_scratch/<slug>_answer.md`, and nothing else anywhere. Every command above is
+run from this folder with the relative paths exactly as printed.
+
+Every reply while the research assistant is on -- an answer, a one-line status, a refusal --
+begins with the line `(research assistant on)`. The final check sends back a reply that
+does not.
+"""
+
+
+# First line of the generated folder instructions. Used as a content-level
+# ownership test so a moved install can still recognise its own file.
+CLAUDE_MD_TITLE = CLAUDE_MD_TEMPLATE.splitlines()[0]
 
 
 def claude_md_text(py_exe, shelf_cli):
@@ -153,7 +244,8 @@ def claude_md_text(py_exe, shelf_cli):
             .replace("{SHELF}", str(shelf_cli))
             .replace("{FUSION}", FROZEN_FUSION)
             .replace("{CAPCHAN}", FROZEN_CAPTION_CHANNEL)
-            .replace("{PAGECAP}", FROZEN_PAGE_CAPTION))
+            .replace("{PAGECAP}", FROZEN_PAGE_CAPTION)
+            .replace("{FIRST}", str(L.FIRST_PAGE_INDEX)))
 
 
 # --------------------------------------------------------------------- #
@@ -221,7 +313,7 @@ def _sha(path):
 # commands
 # --------------------------------------------------------------------- #
 def do_setup(corpus, py_exe=None, shelf_cli=None, register=True, shelf_dir=None,
-             db_path=None):
+             db_path=None, log_dir=None):
     root = Path(corpus).resolve()
     if not root.is_dir():
         print("NO_SUCH_CORPUS %s" % root, file=sys.stderr)
@@ -249,6 +341,9 @@ def do_setup(corpus, py_exe=None, shelf_cli=None, register=True, shelf_dir=None,
     sp.write_text(json.dumps(state, indent=1), encoding="utf-8")
 
     cdir.mkdir(parents=True, exist_ok=True)
+    # F-25: with --log-dir the hooks log there (the install's artefacts) instead of under
+    # RUNS, which in a portable layout is a `_private` directory beside the recipient's folder.
+    log_arg = ' --log-dir "{}"'.format(Path(log_dir).resolve()) if log_dir else ""
     # The citation guard (F61) rides alongside the deny list: a Stop hook that
     # reads the finished answer and asks once if it cites a page the session
     # never opened. stack.py's hook entries have this shape.
@@ -263,7 +358,13 @@ def do_setup(corpus, py_exe=None, shelf_cli=None, register=True, shelf_dir=None,
         # running it without the flag.
         "hooks": {"Stop": [{"matcher": "", "hooks": [
             {"type": "command",
-             "command": '"{}" "{}" --v2'.format(py_exe, L.BIN / "c_stop_guard.py")}]}]},
+             "command": '"{}" "{}" --v2'.format(py_exe, L.BIN / "c_stop_guard.py") + log_arg},
+            # The second guard checks what the first cannot: whether the quoted lines are
+            # really on the pages they cite, and whether the answer's figures appear in the
+            # notes at all. Both ask at most once per session and neither blocks an answer
+            # that cited nothing, so a session that disagrees still terminates.
+            {"type": "command",
+             "command": '"{}" "{}"'.format(py_exe, L.BIN / "c_verify_guard.py") + log_arg}]}]},
     }
     sj.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     md.write_text(claude_md_text(py_exe, shelf_cli), encoding="utf-8")
@@ -306,6 +407,35 @@ def do_status(corpus):
     return 0
 
 
+def _looks_like_ours(root):
+    """Move-proof ownership test: match content, not path.
+
+    The state file lives in the pack's scratch dir keyed by the corpus's ABSOLUTE
+    path, so a folder that has been moved has no state file under its new key --
+    and do_teardown then refused to remove the two files this tool had written
+    itself, calling them foreign. Ownership has to survive a move, so when there is
+    no state file the two files are checked for the shape this pack writes: the
+    generated CLAUDE.md's first line, and a settings.json that points at our stop
+    guard. Anything else is still refused.
+    """
+    md, sj = root / "CLAUDE.md", root / ".claude" / "settings.json"
+    if not md.exists():
+        return False
+    try:
+        if not md.read_text(encoding="utf-8", errors="replace").startswith(CLAUDE_MD_TITLE):
+            return False
+    except OSError:
+        return False
+    if sj.exists():
+        try:
+            cfg = json.loads(sj.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if "c_stop_guard.py" not in json.dumps(cfg):
+            return False
+    return True
+
+
 def do_teardown(corpus):
     root = Path(corpus).resolve()
     sp = state_path(root)
@@ -314,13 +444,32 @@ def do_teardown(corpus):
 
     if not sp.exists():
         if md.exists() or cdir.exists():
-            print("FOREIGN_FILES_PRESENT no state file, refusing to delete %s"
-                  % root, file=sys.stderr)
-            return 3
+            if not _looks_like_ours(root):
+                print("FOREIGN_FILES_PRESENT no state file, refusing to delete %s"
+                      % root, file=sys.stderr)
+                return 3
+            # No state file, but these are demonstrably the files this pack writes:
+            # the folder was moved, which is exactly what the pack promises to
+            # survive. Remove them and say which files went.
+            print("ADOPTED_MOVED_INSTALL %s (no state file for this path)" % root)
+            for p in (sj, md):
+                if p.exists():
+                    p.unlink()
+            if cdir.exists():
+                try:
+                    cdir.rmdir()
+                except OSError:
+                    print("CLAUDE_DIR_NOT_EMPTY %s" % cdir, file=sys.stderr)
+            print("REMOVED %s" % root)
+            return 0
         print("ALREADY_CLEAN %s" % root)
         return 0
 
     state = json.loads(sp.read_text(encoding="utf-8"))
+    # `created` is the only source of ownership for a state file that was found. It
+    # holds absolute paths, which is correct here: the file was located by a key
+    # derived from this corpus's own path, so the paths in it are this corpus's.
+    # (A moved folder has no state file at all, which is the branch above.)
     created = {Path(p) for p in state.get("created", [])}
     present = {p for p in (sj, md) if p.exists()}
     foreign = present - created
@@ -405,6 +554,11 @@ def do_selftest():
             "revised, in the next one or two" in text)
         chk("claude_md_has_sources_block_rule",
             "End every answer with a `Sources` block" in text)
+        # Test 2 (2026-10-10)
+        chk("claude_md_prose_before_absence", "the earliest I could find" in text
+            and 'rewrites that pair the row name' in text)
+        chk("claude_md_no_evidence_in_own_voice", "Do not describe how you searched" in text)
+        chk("claude_md_names_banned_vocabulary", '"shelf", "rewrites"' in text)
 
     rc2 = do_setup(str(base), register=False)
     chk("second_setup_refuses_exit_3", rc2 == 3)
@@ -456,13 +610,16 @@ def main():
             p.add_argument("--db", dest="db_path", default=None,
                            help="pages database to register (default: the "
                                 "s2_fts5 development rung)")
+            p.add_argument("--log-dir", dest="log_dir", default=None,
+                           help="where the Stop hooks write their logs (default: RUNS/hooks)")
     sub.add_parser("selftest")
     a = ap.parse_args()
     if not a.cmd:
         ap.print_usage()
         return 2
     if a.cmd == "setup":
-        return do_setup(a.corpus, shelf_dir=a.shelf_dir, db_path=a.db_path)
+        return do_setup(a.corpus, shelf_dir=a.shelf_dir, db_path=a.db_path,
+                        log_dir=a.log_dir)
     if a.cmd == "status":
         return do_status(a.corpus)
     if a.cmd == "teardown":

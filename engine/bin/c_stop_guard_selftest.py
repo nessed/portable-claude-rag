@@ -41,12 +41,16 @@ def transcript(tmp, opens, final_text):
 
 
 def run_guard(tpath, session_id, stop_hook_active=False, markers=None, v2=False,
-              v2_via="arg"):
+              v2_via="arg", extra_args=()):
     """v2_via="arg" drives the guard the way c_stack.py installs it (--v2);
     "env" drives it through STOP_GUARD_V2=1. Both must work, and the argument
     form is the one that ships, because a hook command's shell is the host's
     choice and an env prefix can be silently dropped."""
     env = dict(os.environ)
+    # F-25: the guard's default log is under RUNS, which in a portable install is a
+    # `_private` directory beside the recipient's folder -- and c_selftest, which the
+    # runbook has them run, drives this file. Keep the log with the synthetic transcript.
+    env["STOP_GUARD_LOG"] = str(Path(tpath).parent / "stop_guard_selftest.log")
     if markers:
         env["STOP_GUARD_MARKERS"] = str(markers)
     env.pop("STOP_GUARD_V2", None)
@@ -54,7 +58,8 @@ def run_guard(tpath, session_id, stop_hook_active=False, markers=None, v2=False,
         env["STOP_GUARD_V2"] = "1"
     payload = json.dumps({"session_id": session_id, "transcript_path": str(tpath),
                           "stop_hook_active": stop_hook_active})
-    argv = [sys.executable, GUARD] + (["--v2"] if (v2 and v2_via == "arg") else [])
+    argv = ([sys.executable, GUARD] + (["--v2"] if (v2 and v2_via == "arg") else [])
+            + list(extra_args))
     p = subprocess.run(argv, input=payload, capture_output=True,
                        text=True, errors="replace", env=env)
     try:
@@ -219,6 +224,65 @@ def main():
     chk("v1_unchanged_without_the_flag",
         d16a.get("decision") != "block" and d16b.get("decision") != "block",
         prose=d16a.get("decision"), figures=d16b.get("decision"))
+
+    # 19-23. Test 2 (2026-10-10): the ON header, the machinery vocabulary, once per TURN.
+    HDR = ["--require-header", "(research assistant on)", "--ban-phrases"]
+    t19 = transcript(tmp, [(OPENED, 7)],
+                     "The figure is 4321, from %s page 7.\n\nSources\n4321 | %s | p7 | \"x\"" % (OPENED, OPENED))
+    d19, _ = run_guard(t19, "hdr-A", markers=markers, v2=True, extra_args=HDR)
+    chk("missing_header_blocked", d19.get("decision") == "block"
+        and "(research assistant on)" in (d19.get("reason") or ""), decision=d19.get("decision"))
+    t20 = transcript(tmp, [(OPENED, 7)],
+                     "(research assistant on)\n\nThe figure is 4321, from %s page 7.\n\nSources\n4321 | %s | p7 | \"x\"" % (OPENED, OPENED))
+    d20, _ = run_guard(t20, "hdr-B", markers=markers, v2=True, extra_args=HDR)
+    chk("header_present_passes", d20.get("decision") != "block", decision=d20.get("decision"))
+    t21 = transcript(tmp, [(OPENED, 7)],
+                     "(research assistant on)\n\nI searched the whole index with five rewrites and the shelf returned nothing on floods.\n\nSources\nnone")
+    d21, _ = run_guard(t21, "hdr-C", markers=markers, v2=True, extra_args=HDR)
+    chk("machinery_words_blocked", d21.get("decision") == "block"
+        and "rewrites" in (d21.get("reason") or "").lower(), reason=(d21.get("reason") or "")[:120])
+    t22 = transcript(tmp, [(OPENED, 7)],
+                     "(research assistant on)\n\nThe consumer price index rose; the index of industrial production fell. I looked for flood, reconstruction and rehabilitation and no readable page mentions them.\n\nSources\nnone -- no page in this folder mentions floods")
+    d22, _ = run_guard(t22, "hdr-D", markers=markers, v2=True, extra_args=HDR)
+    chk("plain_index_word_not_blocked", d22.get("decision") != "block", decision=d22.get("decision"))
+    t22b = transcript(tmp, [(OPENED, 7)],
+                      "(research assistant on)\n\nThe README is stale; rewrite its table for this folder. The figure is 4321, from %s page 7.\n\nSources\n4321 | %s | p7 | \"x\"" % (OPENED, OPENED))
+    d22b, _ = run_guard(t22b, "hdr-D2", markers=markers, v2=True, extra_args=HDR)
+    chk("ordinary_rewrite_not_blocked", d22b.get("decision") != "block", decision=d22b.get("decision"))
+    chk("v1_v2_unchanged_without_the_new_flags",
+        run_guard(t19, "hdr-E", markers=markers, v2=True)[0].get("decision") != "block"
+        and run_guard(t21, "hdr-F", markers=markers, v2=True)[0].get("decision") != "block")
+    # 24-25. Test 3: nothing after the Sources block
+    SL = HDR + ["--sources-last"]
+    t24 = transcript(tmp, [(OPENED, 7)],
+                     "(research assistant on)\n\nThe figure is 4321.\n\n**Sources**\n- 4321 | %s | p7 | \"x\"\n\nOne caution: the table starts later than the series." % OPENED)
+    d24, _ = run_guard(t24, "sl-A", markers=markers, v2=True, extra_args=SL)
+    chk("prose_after_sources_blocked", d24.get("decision") == "block"
+        and "End the reply with the Sources block" in (d24.get("reason") or ""), decision=d24.get("decision"))
+    t25 = transcript(tmp, [(OPENED, 7)],
+                     "(research assistant on)\n\nOne caution: the table starts later than the series. The figure is 4321.\n\n**Sources**\n- 4321 | %s | p7 | \"x\"\n- 2013-14 context | %s | p7 | \"y\"\n" % (OPENED, OPENED))
+    d25, _ = run_guard(t25, "sl-B", markers=markers, v2=True, extra_args=SL)
+    chk("sources_last_passes", d25.get("decision") != "block", decision=d25.get("decision"))
+    d25b, _ = run_guard(t24, "sl-C", markers=markers, v2=True, extra_args=HDR)
+    chk("sources_last_off_without_flag", d25b.get("decision") != "block", decision=d25b.get("decision"))
+
+    # once per TURN: a second user turn in the same session may be blocked again
+    t23 = Path(tmp) / "turns.jsonl"
+    lines = [json.dumps({"type": "user", "uuid": "u-1", "message": {"role": "user", "content": "q1"}}),
+             json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                 {"type": "text", "text": "The figure is 4321, from %s page 7." % OTHER}]}})]
+    t23.write_text("\n".join(lines), encoding="utf-8")
+    d23a, _ = run_guard(t23, "turn-A", markers=markers)
+    d23b, _ = run_guard(t23, "turn-A", markers=markers)
+    lines.append(json.dumps({"type": "user", "uuid": "u-2", "message": {"role": "user", "content": "q2"}}))
+    lines.append(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "Again 4321, from %s page 7." % OTHER}]}}))
+    t23.write_text("\n".join(lines), encoding="utf-8")
+    d23c, _ = run_guard(t23, "turn-A", markers=markers)
+    chk("blocks_once_per_turn_not_once_per_session",
+        d23a.get("decision") == "block" and d23b.get("decision") != "block"
+        and d23c.get("decision") == "block",
+        first=d23a.get("decision"), same_turn=d23b.get("decision"), next_turn=d23c.get("decision"))
 
     ok = all(c["pass"] for c in checks)
     rec = {"generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

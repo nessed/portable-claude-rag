@@ -115,18 +115,19 @@ def build_cards(db_path, out_dir, state_dir):
     caption_seen = defaultdict(set)    # rel -> set(caption text) for dedup
 
     cur_rel = None
-    p_bodies = {}          # page_index -> body, for page_index 0,1,2 of current doc
+    p_bodies = {}          # page_index -> body, for the first three pages of the doc
     contents_parts = []    # bodies of first-15 pages containing Contents/List of Tables
     page_count_seen = 0
+    FIRST = L.FIRST_PAGE_INDEX   # a doc's first page is FIRST, not 0 -- see labpaths
 
     def flush(rel):
         if rel is None or rel not in files_meta:
             return
         meta = files_meta[rel]
         stem = Path(rel).stem
-        p0 = p_bodies.get(0, "")
-        p1 = p_bodies.get(1, "")
-        p2 = p_bodies.get(2, "")
+        p0 = p_bodies.get(FIRST, "")
+        p1 = p_bodies.get(FIRST + 1, "")
+        p2 = p_bodies.get(FIRST + 2, "")
         title, title_source = extract_title(p0, stem)
         ordered_fy, seen_fy = [], set()
         for src in (title, rel, p0, p1, p2):
@@ -171,7 +172,7 @@ def build_cards(db_path, out_dir, state_dir):
             contents_parts = []
             page_count_seen = 0
         page_count_seen += 1
-        if c1 in (0, 1, 2):
+        if c1 in (FIRST, FIRST + 1, FIRST + 2):
             p_bodies[c1] = c2
         if page_count_seen <= 15 and CONTENTS_MARK_RE.search(c2):
             contents_parts.append(c2)

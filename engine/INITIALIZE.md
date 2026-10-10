@@ -1,9 +1,9 @@
 # Initialize
 
-You are Claude Code. Someone opened a terminal in this folder, started you, and
-typed **initialize**. They may never have used a terminal before. Do the whole
-setup yourself, explain it in plain English as you go, and stop and ask when
-something is genuinely missing from their machine.
+You are Claude Code. Someone opened a terminal in this folder (or double-clicked
+`Start research assistant.cmd`), started you, and typed **initialize**. They may never
+have used a terminal before. Do the whole setup yourself, explain it in plain English as
+you go, and stop and ask when something is genuinely missing from their machine.
 
 This document is the whole procedure. You do not need anything outside this
 folder, and you must not go looking for any.
@@ -11,26 +11,27 @@ folder, and you must not go looking for any.
 ## What this folder is
 
 ```
-<this folder>
-  engine\          the tool. Never edit anything under engine\bin.
-  <documents>\     the folder of research documents. It is the one that is not `engine`.
-  INSTALL.md          the same procedure written for a person doing it by hand.
+<this folder>          the person's research documents, in whatever subfolders they keep
+  engine\             the tool. Never edit anything under engine\bin.
+  CLAUDE.md            what you read at startup; it routes by whether the tool is set up
+  .claude\            the hooks and the /rag-on, /rag-off, /ask skills (already in place)
 ```
 
-Find the documents folder first: list this directory, and take the one directory
-that is not `engine` and not a dot-folder. If there is more than one candidate,
-ask which one. Call it `<docs>` below and use its real name in every command.
+The documents folder is **this folder**. Call it `<docs>` below; in every command it is
+written `.` (the current directory). Do not ask which folder to index, and do not index
+anything else. `engine\` is left out of the index automatically.
 
 ## Step 0 - tell them what is about to happen
 
 Before you run anything, say roughly this, in your own words:
 
 > I'm going to set up a Python environment inside `engine`, then read every
-> document in `<docs>` once and build a searchable index of it. The reading pass
+> document in this folder once and build a searchable index of it. The reading pass
 > is the slow part: roughly three to six minutes per thousand documents, and
-> it uses most of the CPU while it runs. Nothing outside this folder is
-> touched, and nothing in `<docs>` is modified except two small files the
-> tool owns. Say stop at any point and nothing is lost -- rerunning resumes.
+> it uses most of the CPU while it runs. Nothing is written to this folder outside
+> `engine`, and none of your documents is modified. The only thing outside the folder
+> is a 130 MB language model cached under your user profile on the first run. Say
+> stop at any point and nothing is lost -- rerunning resumes.
 
 Then go, without waiting for permission. They already said initialize.
 
@@ -39,8 +40,10 @@ Then go, without waiting for permission. They already said initialize.
 PowerShell paints everything a program writes to stderr red, and prints a block
 headed `NativeCommandError` around it. Progress messages, pip's "a new release of
 pip is available" notice and the index pass's *building page-range cache,
-one-time* line all arrive that way. It looks exactly like a crash and it is not
-one.
+one-time* line all arrive that way, and so does the first build's model download:
+a `Fetching 5 files` progress bar, a warning about unauthenticated requests to the
+HF Hub (no `HF_TOKEN` is needed), and a `huggingface_hub` warning that the machine
+does not support symlinks. It looks exactly like a crash and it is not one.
 
 Judge every command in this document by its exit code, never by the colour. When
 a red block appears, say what it actually is before the person watching decides
@@ -88,6 +91,10 @@ One line per prerequisite. Read them all before reacting.
 - **embedding_model ... NOT found** -- not a failure. It says the first index
   build will download a 130 MB model, so that build needs internet.
 - **free_disk FAIL** -- they need about 1 GB per 2,000 documents. Say the number.
+- **ocr ... not found** -- not a failure. It means a scanned page with no text
+  layer is reported as `image_only_no_text` rather than read. OCR is off unless
+  `PCR_OCR=1` is set and both `tesseract` and `pdftoppm` are on PATH. If the folder
+  turns out to hold scans, say which files were unreadable; do not install OCR for them.
 
 Do not go on to step 4 while `pdftotext` is failing. Everything will index as
 `failed_parser` and the result will look like the tool is broken.
@@ -100,10 +107,10 @@ Pick the worker count from their machine rather than taking the default:
 python -c "import os; print(max(2, min(12, (os.cpu_count() or 4) - 2)))"
 ```
 
-Then, with `<docs>` and `<N>` filled in:
+Then, with `<N>` filled in:
 
 ```
-engine\.venv\Scripts\python.exe engine\bin\setup_folder.py install --folder <docs> --artefacts engine\artefacts --seed-env --workers <N>
+engine\.venv\Scripts\python.exe engine\bin\setup_folder.py install --folder . --artefacts engine\artefacts --seed-env --workers <N>
 ```
 
 This is the long one. Tell them the estimate before you start it and let it run.
@@ -116,13 +123,19 @@ This is the long one. Tell them the estimate before you start it and let it run.
   final report gives the counts. Only worry if most of the folder failed, which
   almost always means `pdftotext` is missing.
 - An install that stops halfway. Rerun the identical command; it resumes.
-- `REFUSED <folder> already has a CLAUDE.md`, exit code 3. That is not a
-  failed install, it is a finished one: the last thing install does is write
-  that file. The folder is already set up. Go to step 5 and check it, and do
-  not run `uninstall` to "clean up" first -- that throws the index away.
+- `REFUSED <folder> is already set up`, exit code 3. That is not a failed
+  install, it is a finished one: the last thing install does is write the `READY`
+  marker under `engine\artefacts`. The folder is ready. Go to step 5 and check it,
+  and do not run `uninstall` to "clean up" first -- that throws the index away.
+- `ADOPTING index <old> -> <new>`. The folder was moved or renamed since the index
+  was built. Nothing is broken; the index is repointed and the install continues.
 
 When it finishes, tell them how many documents were read, how many pages that
-came to, how long it took, and how many files were skipped and why.
+came to, how long it took, and how many files were skipped and why. Two fields in
+that report are to be quoted rather than summarised: `failed_by={...}` names each
+failure class with its count, and `pages_with_no_readable_text=N` counts pages that
+carry no text layer at all. If either is non-zero, say the number out loud. A skipped
+file the person never hears about is a hole in every answer they get afterwards.
 
 ## Step 5 - check the build
 
@@ -134,31 +147,39 @@ engine\.venv\Scripts\python.exe engine\bin\c_selftest.py --db engine\artefacts\p
 count" and must stay. Report the pass count as one line. If any check fails, show
 the failing lines verbatim and stop -- do not try to repair the index.
 
-## Step 6 - hand it over
+## Step 6 - hand it over, and switch yourself over
+
+From this point the research assistant is **ON** in this very chat: `engine\artefacts\READY`
+exists, so for every question about the documents you read `engine/ANSWER.md` and follow
+it exactly, you begin each reply with `(research assistant on)`, and you may not create
+or change any file in this folder outside `engine\` (the hooks refuse it). No new
+terminal and no restart is needed.
 
 Say, in your own words:
 
-> It's ready. To ask it something, open a terminal in the `<docs>` folder and
-> start Claude Code there:
+> It's ready, and it's on. Ask me anything about these documents right here, in plain
+> English -- "how has spending on X changed over the last ten years?" An answer usually
+> takes one to three minutes, because I open the real pages before I reply. Every number
+> comes with a `Sources` line naming the file and page it came from, and when the folder
+> does not contain the answer, I say so instead of guessing.
 >
->     cd <docs>
->     claude --model claude-opus-5
->
-> Then ask in plain English -- "how has spending on X changed over the last ten
-> years?" An answer usually takes one to three minutes, because it is opening
-> real pages before it replies. Every number comes with a `Sources` line naming
-> the file and page it came from, and when the folder does not contain the
-> answer, it says so instead of guessing. The first few commands will ask your
-> permission to run; approving them is expected.
+> While it is on I will not change any file in this folder. `/rag-off` switches it off
+> and I behave like ordinary Claude Code again; `/rag-on` switches it back; `/rag-status`
+> shows what the index covers; `/rag-refresh` picks up documents you add later; `/ask`
+> sends one question through it even when it is off. Next time, just double-click
+> `Start research assistant.cmd` or open Claude Code in this folder.
 >
 > One thing to know: the answers are only as good as this folder. A `Sources`
 > line is a claim you can check in seconds -- open the file at that page. Do
-> check a few early on.
+> check a few early on. I also check myself: before handing over an answer I re-open
+> every page I cited and confirm the quoted line is really there. Treat that as a floor,
+> not a guarantee -- it cannot catch a figure reported as missing when the folder does
+> have it, so your own spot checks still matter.
 
-If they would rather not leave this terminal, the same question can be asked with:
+If they would rather not use the chat, the same question can be asked with:
 
 ```
-engine\.venv\Scripts\python.exe engine\bin\setup_folder.py ask --folder <docs> "<their question>"
+engine\.venv\Scripts\python.exe engine\bin\setup_folder.py ask --folder . "<their question>"
 ```
 
 ## Rules for you while doing this
@@ -176,8 +197,9 @@ engine\.venv\Scripts\python.exe engine\bin\setup_folder.py ask --folder <docs> "
 ## To remove it
 
 ```
-engine\.venv\Scripts\python.exe engine\bin\setup_folder.py uninstall --folder <docs> --purge --artefacts engine\artefacts
+engine\.venv\Scripts\python.exe engine\bin\setup_folder.py uninstall --folder . --purge --artefacts engine\artefacts
 ```
 
-That deletes the two files the tool wrote into `<docs>` and the whole index.
-Their documents are untouched.
+That deletes the index. Deleting `engine\`, `.claude\`, `CLAUDE.md`,
+`README_FIRST.md` and `Start research assistant.cmd` removes everything else;
+their documents are untouched.

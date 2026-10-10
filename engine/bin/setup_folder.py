@@ -8,6 +8,7 @@ in it.
 
   python corpus-lab/bin/setup_folder.py doctor
   python corpus-lab/bin/setup_folder.py install --folder <path> [--label <name>] [--workers 12]
+  python corpus-lab/bin/setup_folder.py refresh   --folder <path> [--artefacts <dir>]
   python corpus-lab/bin/setup_folder.py status    --folder <path>
   python corpus-lab/bin/setup_folder.py ask       --folder <path> "<question>" [--model claude-opus-5]
   python corpus-lab/bin/setup_folder.py uninstall --folder <path> [--purge]
@@ -44,6 +45,7 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -69,6 +71,24 @@ V2_WARNING = ("EXPERIMENTAL SHELF V2 -- failed Gate S 2026-09-15; not production
 
 # Deterministic defaults, recorded rather than assumed (Plan E section D).
 SEED_ENV = {"PYTHONHASHSEED": "0", "OMP_NUM_THREADS": "4"}
+
+# Paste-in layout (2026-10-10). The package is unzipped INTO the documents folder, so the
+# artefacts directory sits inside the folder being indexed. Nothing the engine owns may be
+# read as a document, and the two files the old layout wrote into the folder (CLAUDE.md and
+# .claude/settings.json) now ship in the package and are never written by install. The
+# marker that says "set up" is <artefacts>/READY.
+READY_NAME = "READY"
+ANSWER_NAME = "ANSWER.md"
+
+
+def in_place_top(folder, art_dir):
+    """The top-level directory of `folder` that holds the artefacts (normally `engine`),
+    or None when the artefacts live outside the folder (the old side-by-side layout)."""
+    try:
+        rel = Path(art_dir).resolve().relative_to(Path(folder).resolve())
+    except ValueError:
+        return None
+    return rel.parts[0] if rel.parts else None
 
 
 def _py():
@@ -135,6 +155,23 @@ def doctor(a):
         ("cached at %s" % mp) if found
         else "NOT found near %s -- the first run will download it, so that run needs internet" % mp)
 
+    # OCR is optional and off by default, so its absence is reported, never failed: a
+    # scanned page with no text layer is then counted as image_only_no_text rather than
+    # read. Only asking for OCR (PCR_OCR=1) without the two tools it needs is a failure.
+    ocr_on = os.environ.get("PCR_OCR", "").strip().lower() not in ("", "0", "off", "false")
+    ocr_missing = [n for n, v in (("tesseract", "TESSERACT_EXE"), ("pdftoppm", "PDFTOPPM_EXE"))
+                   if not (os.environ.get(v) and Path(os.environ[v]).exists())
+                   and not shutil.which(n)]
+    if ocr_on:
+        chk("ocr", not ocr_missing,
+            "on (PCR_OCR=1)" if not ocr_missing else
+            "PCR_OCR=1 but %s not found -- put it on PATH or unset PCR_OCR"
+            % " and ".join(ocr_missing))
+    else:
+        chk("ocr", True,
+            "off (PCR_OCR not set) -- scanned pages will be reported as image_only_no_text"
+            + ("; tesseract/pdftoppm not found" if ocr_missing else ""))
+
     free_gb = shutil.disk_usage(str(L.RETRIEVAL_LAB)).free / 1e9
     chk("free_disk_ge_1gb_per_2000_files", free_gb >= 1.0, "%.1f GB free" % free_gb)
 
@@ -164,6 +201,41 @@ def artefacts(label, root=None):
             "cap_vec": d / "shelf" / "captions.f16.npy"}
 
 
+def index_owner(db_path):
+    """The corpus_root recorded inside an existing index, or None when there is no
+    index. Answers "whose pages are these?" before a shelf gets built on top of them.
+
+    Why it exists: an install skips [1/5] whenever pages.db is already there, so
+    pointing a SECOND folder at a populated artefacts directory builds a shelf over
+    the first folder's pages and prints Ready. Measured live: both indexes on this
+    machine still claimed the Temp path they were built in, months after the move.
+    """
+    if not os.path.exists(db_path):
+        return None
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % Path(db_path).as_posix(), uri=True)
+        row = con.execute("SELECT v FROM meta WHERE k='corpus_root'").fetchone()
+        con.close()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+
+def _repoint_index(db_path, folder):
+    """Record the new owner. Called only after --adopt, so the metadata stops
+    naming a folder the index is no longer used for."""
+    try:
+        con = sqlite3.connect(db_path)
+        con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('corpus_root',?)",
+                    (str(Path(folder).resolve()),))
+        con.commit()
+        con.close()
+        return True
+    except sqlite3.Error as e:
+        print("ADOPT_META_FAILED %s" % e, file=sys.stderr)
+        return False
+
+
 def install(a):
     folder = Path(a.folder).resolve()
     if not folder.is_dir():
@@ -173,14 +245,40 @@ def install(a):
         print("REFUSED %s is a frozen rung; its artefacts are the recorded ones. "
               "Copy the folder if you want to reindex it." % folder.name, file=sys.stderr)
         return 3
-    if (folder / "CLAUDE.md").exists():
-        print("REFUSED %s already has a CLAUDE.md. Run `uninstall` first, or "
-              "point at a folder this tool owns." % folder, file=sys.stderr)
-        return 3
-
     label = a.label or folder.name
     builder = getattr(a, "builder", "v1")
     art = artefacts(label, getattr(a, "artefacts", None))
+    top = in_place_top(folder, art["dir"])
+    refresh = bool(getattr(a, "refresh", False))
+
+    if top is None and (folder / "CLAUDE.md").exists() and not refresh:
+        # Old layout: the last thing install writes into the folder is CLAUDE.md.
+        print("REFUSED %s already has a CLAUDE.md. Run `uninstall` first, or "
+              "point at a folder this tool owns." % folder, file=sys.stderr)
+        return 3
+    if (art["dir"] / READY_NAME).exists() and not refresh:
+        print("REFUSED %s is already set up (%s exists). Nothing to do; to pick up "
+              "documents added since, run `refresh`." % (folder, art["dir"] / READY_NAME),
+              file=sys.stderr)
+        return 3
+
+    # Whose pages are in that index? [1/5] skips when pages.db exists, so without
+    # this the shelf is built over another folder's pages and the install reports
+    # Ready. Refuse and name the owner; --adopt repoints it deliberately. In the
+    # paste-in layout the index can only belong to the folder that holds it, so a
+    # mismatch means the folder was moved: adopt without being asked.
+    owner = index_owner(art["db"])
+    if owner and Path(owner).resolve() != Path(folder).resolve():
+        if top is not None:
+            setattr(a, "adopt", True)
+        if not getattr(a, "adopt", False):
+            print("FOREIGN_INDEX_PRESENT %s belongs to %s" % (art["db"], owner),
+                  file=sys.stderr)
+            print("  re-run with --adopt to repoint it at %s" % folder, file=sys.stderr)
+            return 3
+        print("ADOPTING index %s -> %s" % (owner, folder))
+        _repoint_index(art["db"], folder)
+
     art["shelf_dir"].mkdir(parents=True, exist_ok=True)
     timings = {}
 
@@ -198,16 +296,21 @@ def install(a):
         print("!" * 72, flush=True)
     print("BUILDER %s (%s) -> %s" % (builder, builder_desc, builder_script))
 
-    # 1. page index
-    if art["db"].exists():
+    # 1. page index. index_build is incremental: with an existing db it reads only the
+    # files it has not seen (and retries the ones that failed), so `refresh` runs it again.
+    if art["db"].exists() and not refresh:
         print("[1/5] index: already built at %s -- skipping" % art["db"])
         timings["index_s"] = 0
     else:
-        print("[1/5] indexing %s -> %s (%d workers)" % (folder, art["db"], a.workers),
+        print("[1/5] %s %s -> %s (%d workers)" % (
+            "refreshing" if art["db"].exists() else "indexing", folder, art["db"], a.workers),
               flush=True)
-        rc, s = _run([_py(), "-u", str(L.BIN / "index_build.py"),
-                      "--corpus", str(folder), "--db", str(art["db"]),
-                      "--workers", str(a.workers)], env=env)
+        cmd = [_py(), "-u", str(L.BIN / "index_build.py"),
+               "--corpus", str(folder), "--db", str(art["db"]),
+               "--workers", str(a.workers)]
+        if top is not None:
+            cmd += ["--exclude-top", top]
+        rc, s = _run(cmd, env=env)
         timings["index_s"] = round(s, 1)
         print("      %.0fs" % s, flush=True)
         if rc != 0:
@@ -216,10 +319,30 @@ def install(a):
 
     # 2. shelf -- v1 by default (Plan E decision 4): the portable must build the
     # same shelf that was measured, not the experimental one that failed Gate S.
-    if art["cards"].exists() and art["shelf"].exists():
-        print("[2/5] shelf: already built -- skipping")
-        timings["shelf_s"] = 0
-    else:
+    needs_full = not (art["cards"].exists() and art["shelf"].exists())
+    if not needs_full:
+        # The shelf exists, but the index may have grown since. A missing document used
+        # to mean a full rebuild of every card; c_shelf_update brings the shelf forward
+        # by embedding only what is missing, and prints UP_TO_DATE when there is nothing
+        # to do. The caption artefacts are updated in place by it, so their own skip
+        # tests below still hold.
+        print("[2/5] shelf: exists -- bringing it up to date with the index", flush=True)
+        rc, s = _run([_py(), "-u", str(L.BIN / "c_shelf_update.py"),
+                      "--db", str(art["db"]), "--out", str(art["shelf_dir"])], env=env)
+        timings["shelf_s"] = round(s, 1)
+        if rc == 6:
+            # More than half the index is newer than the shelf, so this is not "a document
+            # was added", it is "this is a different corpus" (or a first build onto an
+            # inherited index). An incremental merge would cost the same as a rebuild and
+            # leave rows for documents the index no longer has.
+            print("      more than half the index is newer than the shelf -- rebuilding it "
+                  "in full instead", flush=True)
+            needs_full = True
+        elif rc != 0:
+            print("SHELF_UPDATE_FAILED rc=%d" % rc, file=sys.stderr)
+            return 4
+
+    if needs_full:
         print("[2/5] building the shelf with builder %s (card vectors take the "
               "longest)" % builder, flush=True)
         rc, s = _run([_py(), "-u", str(L.BIN / builder_script),
@@ -257,15 +380,31 @@ def install(a):
             print("CAPTION_EMBED_FAILED rc=%d" % rc, file=sys.stderr)
             return 4
 
-    # 5. install the two files and register the root
-    print("[5/5] installing CLAUDE.md and .claude/settings.json", flush=True)
-    rc, s = _run([_py(), str(L.BIN / "c_stack.py"), "setup",
-                  "--corpus", str(folder), "--shelf-dir", str(art["shelf_dir"]),
-                  "--db", str(art["db"])])
-    timings["stack_s"] = round(s, 1)
-    if rc != 0:
-        print("STACK_SETUP_FAILED rc=%d" % rc, file=sys.stderr)
-        return 4
+    # 5. register the root. Paste-in layout: CLAUDE.md, .claude/settings.json and the
+    # skills ship in the package, so nothing is written into the folder; the answering
+    # procedure goes to <top>/ANSWER.md with relative paths and READY marks the install.
+    # Old layout: c_stack writes the two files into the folder, as before.
+    if top is not None:
+        print("[5/5] registering the folder (paste-in layout: nothing is written outside %s)"
+              % top, flush=True)
+        t0 = time.time()
+        import c_shelf as CSH
+        import c_stack as CST
+        CSH.do_register(str(folder), str(art["db"]), str(art["shelf"]))
+        answer = folder / top / ANSWER_NAME
+        answer.write_text(CST.claude_md_text("%s/.venv/Scripts/python.exe" % top,
+                                             "%s/bin/c_shelf.py" % top)
+                          + CST.PASTE_IN_ADDENDUM, encoding="utf-8")
+        timings["stack_s"] = round(time.time() - t0, 1)
+    else:
+        print("[5/5] installing CLAUDE.md and .claude/settings.json", flush=True)
+        rc, s = _run([_py(), str(L.BIN / "c_stack.py"), "setup",
+                      "--corpus", str(folder), "--shelf-dir", str(art["shelf_dir"]),
+                      "--db", str(art["db"]), "--log-dir", str(art["dir"] / "hooks")])
+        timings["stack_s"] = round(s, 1)
+        if rc != 0:
+            print("STACK_SETUP_FAILED rc=%d" % rc, file=sys.stderr)
+            return 4
 
     # what the folder turned out to contain
     import c_shelf as CSH
@@ -287,10 +426,28 @@ def install(a):
     except Exception as e:
         print("MANIFEST_FAILED %s" % e, file=sys.stderr)
         return 5
+    if top is not None:
+        (art["dir"] / READY_NAME).write_text(
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), encoding="utf-8")
+        print("READY    %s" % (art["dir"] / READY_NAME))
+        print("\nReady. Ask it something here, in this same chat. /rag-status shows the "
+              "state, /rag-off switches it off.")
+        return 0
     print("\nReady. Ask it something:")
     print('  cd "%s"' % folder)
     print("  claude --model claude-opus-5")
     return 0
+
+
+def refresh(a):
+    """Pick up documents added since the index was built: the index is incremental, the
+    shelf is brought forward by c_shelf_update, and the manifest and READY are rewritten."""
+    setattr(a, "refresh", True)
+    if not hasattr(a, "builder"):
+        setattr(a, "builder", "v1")
+    if not hasattr(a, "adopt"):
+        setattr(a, "adopt", False)
+    return install(a)
 
 
 # --------------------------------------------------------------------- #
@@ -303,12 +460,27 @@ def status(a):
 
 def uninstall(a):
     folder = Path(a.folder).resolve()
-    rc = _run([_py(), str(L.BIN / "c_stack.py"), "teardown", "--corpus", str(folder)])[0]
+    label = a.label or folder.name
+    art = artefacts(label, getattr(a, "artefacts", None))
+    top = in_place_top(folder, art["dir"])
+    if top is not None:
+        # Paste-in layout: the folder holds nothing the installer wrote except under <top>.
+        rc = 0
+        p = art["dir"] / READY_NAME
+        if p.exists():
+            p.unlink()
+            print("REMOVED %s" % p)
+        off = folder / top / "OFF"
+        if off.exists():
+            off.unlink()
+        print("switched off: %s no longer answers from the index" % folder)
+    else:
+        rc = _run([_py(), str(L.BIN / "c_stack.py"), "teardown", "--corpus", str(folder)])[0]
     # drop the registry entry so a later `find` in that folder does not resolve
     # to a shelf that is no longer installed
     try:
         import c_shelf as CSH
-        reg = CSH._load_registry()
+        reg = CSH._read_registry_file(CSH.REG_PATH)   # the package's own file only
         key = CSH._norm_root_key(folder)
         if key in reg:
             del reg[key]
@@ -317,8 +489,7 @@ def uninstall(a):
     except Exception as e:
         print("registry cleanup skipped: %s" % e, file=sys.stderr)
     if a.purge:
-        label = a.label or folder.name
-        d = artefacts(label, getattr(a, "artefacts", None))["dir"]
+        d = art["dir"]
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
             print("PURGED %s" % d)
@@ -333,7 +504,8 @@ def ask(a):
     Session Log A.5.2: an answer was lost to a `tail` once. Nothing that costs a
     model call gets thrown away here -- it is written whole, then echoed."""
     folder = Path(a.folder).resolve()
-    if not (folder / "CLAUDE.md").exists():
+    ready = (folder / "engine" / "artefacts" / READY_NAME).exists()
+    if not ready and not (folder / "CLAUDE.md").exists():
         print("NOT_INSTALLED %s -- run `install --folder` first" % folder, file=sys.stderr)
         return 3
     out_dir = L.SCRATCH / "asks"
@@ -403,6 +575,17 @@ def main():
                    help="where the index and shelf go (default: the old location)")
     p.add_argument("--seed-env", dest="seed_env", action="store_true",
                    help="set and record PYTHONHASHSEED=0 and OMP_NUM_THREADS=4")
+    p.add_argument("--adopt", action="store_true",
+                   help="repoint an index that belongs to another folder at --folder. "
+                        "Without this the install refuses with FOREIGN_INDEX_PRESENT")
+
+    p = sub.add_parser("refresh",
+                       help="index documents added since install and bring the shelf forward")
+    p.add_argument("--folder", required=True)
+    p.add_argument("--label", default=None)
+    p.add_argument("--workers", type=int, default=12)
+    p.add_argument("--artefacts", default=None)
+    p.add_argument("--seed-env", dest="seed_env", action="store_true")
 
     p = sub.add_parser("status")
     p.add_argument("--folder", required=True)
@@ -426,7 +609,7 @@ def main():
     if not a.cmd:
         ap.print_help()
         return 2
-    return {"doctor": doctor, "install": install, "status": status,
+    return {"doctor": doctor, "install": install, "refresh": refresh, "status": status,
             "uninstall": uninstall, "ask": ask}[a.cmd](a)
 
 

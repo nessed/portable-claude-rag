@@ -1,65 +1,74 @@
 # Install
 
-This package indexes a folder of documents and then lets you ask questions about
-it in plain English, with every answer citing the page it came from.
+This package indexes the folder it sits in and then lets you ask questions about
+the documents in plain English, with every answer citing the page it came from.
 
 ## The short way
 
-Copy `CLAUDE_ROOT.md` to `CLAUDE.md` in the folder that holds both this package
-and your documents, open Claude Code there, and say **initialize**. It reads
-`INITIALIZE.md` -- this same procedure, addressed to it -- and does everything
-below for you, including telling you what to install if something is missing.
+Unzip the package into your documents folder (so that `engine\`, `CLAUDE.md` and
+`.claude\` sit beside your documents), double-click `Start research assistant.cmd`,
+or open Claude Code in that folder and say **initialize**. It reads `INITIALIZE.md`
+-- this same procedure, addressed to it -- and does everything below for you,
+including telling you what to install if something is missing. `CLAUDE_ROOT.md` is a
+copy of the `CLAUDE.md` the package ships.
 
-The rest of this document is for doing it by hand.
+The rest of this document is for doing it by hand, from the documents folder.
 
 ## What you need
 
 - Python 3.11
+- Git for Windows (it ships `pdftotext`)
 - Claude Code on the PATH
 - about 1 GB of free disk per 2,000 documents
 - an internet connection for the **first** run only, to fetch the embedding model
 
 ## Install
 
-From this directory:
+From the documents folder:
 
 ```
-python -m venv .venv
-.venv\Scripts\pip install -r requirements-portable.txt
-.venv\Scripts\python.exe bin\setup_folder.py doctor
+python -m venv engine\.venv
+engine\.venv\Scripts\pip install -r engine\requirements-portable.txt
+engine\.venv\Scripts\python.exe engine\bin\setup_folder.py doctor
 ```
 
 `doctor` prints one line per prerequisite and exits non-zero if anything is
 missing. Fix what it names before going on.
 
-## Index a folder
+## Index the folder
 
 ```
-.venv\Scripts\python.exe bin\setup_folder.py install --folder <your folder> --artefacts .\artefacts --seed-env
+engine\.venv\Scripts\python.exe engine\bin\setup_folder.py install --folder . --artefacts engine\artefacts --seed-env
 ```
 
-The folder itself is left read-only apart from two files the tool owns,
-`CLAUDE.md` and `.claude/settings.json`; `uninstall` removes exactly those. Every
-index artefact goes under `--artefacts`.
+Nothing is written into the folder outside `engine\`: the index goes under
+`engine\artefacts`, the answering procedure to `engine\ANSWER.md`, and a `READY`
+marker says the install finished. `engine\` itself is never indexed.
 
 This builds the **v1 shelf** -- the one every measured number in the report rests
 on. `--builder v2` selects an experimental builder that failed its acceptance gate
 on 2026-09-15; it prints a warning and stamps `builder: v2 (experimental)` into
 the manifest, so it cannot be used by accident.
 
-An interrupted install is resumed by re-running the identical command.
+An interrupted install is resumed by re-running the identical command. Documents
+added later are picked up by:
+
+```
+engine\.venv\Scripts\python.exe engine\bin\setup_folder.py refresh --folder . --artefacts engine\artefacts --seed-env
+```
 
 ## Ask it something
 
 ```
-cd <your folder>
 claude --model claude-opus-5
 ```
 
-or, without leaving this directory:
+in the documents folder. `/rag-off` and `/rag-on` switch the tool off and on;
+while it is on, Claude Code cannot change any file outside `engine\`. Or, without
+Claude Code's chat:
 
 ```
-.venv\Scripts\python.exe bin\setup_folder.py ask --folder <your folder> "<question>"
+engine\.venv\Scripts\python.exe engine\bin\setup_folder.py ask --folder . "<question>"
 ```
 
 ## Check the build
@@ -79,13 +88,14 @@ it the self-test compares your folder against a fixed reference corpus and
 reports a failure that is not one.
 
 ```
-.venv\Scripts\python.exe bin\c_selftest.py --db .\artefacts\pages.db --shelf .\artefacts\shelf\shelf.db --expect-pages 0
+engine\.venv\Scripts\python.exe engine\bin\c_selftest.py --db engine\artefacts\pages.db --shelf engine\artefacts\shelf\shelf.db --expect-pages 0
 ```
 
 ## Remove it
 
 ```
-.venv\Scripts\python.exe bin\setup_folder.py uninstall --folder <your folder>
+engine\.venv\Scripts\python.exe engine\bin\setup_folder.py uninstall --folder . --purge --artefacts engine\artefacts
 ```
 
-Add `--purge --artefacts .\artefacts` to delete the index as well.
+deletes the index. Deleting `engine\`, `.claude\`, `CLAUDE.md`, `README_FIRST.md` and
+`Start research assistant.cmd` removes everything; the documents are untouched.

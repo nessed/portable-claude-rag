@@ -181,7 +181,16 @@ def write_all(art, folder, label, builder, timings, workers=None, seed_env=None)
     d = art["dir"]
     d.mkdir(parents=True, exist_ok=True)
 
-    n_files = sum(1 for x in folder.rglob("*") if x.is_file())
+    # Paste-in layout: the artefacts live inside the folder, under a top-level directory
+    # (engine) whose files are the tool's own and not documents. Leave them out.
+    _skip = None
+    try:
+        _rel = Path(d).resolve().relative_to(folder.resolve())
+        _skip = (folder / _rel.parts[0]).resolve() if _rel.parts else None
+    except ValueError:
+        pass
+    n_files = sum(1 for x in folder.rglob("*")
+                  if x.is_file() and not (_skip and str(x.resolve()).startswith(str(_skip) + os.sep)))
     canon = canonical_export(art)
     canon_path = d / "canonical_export.json"
     canon_path.write_text(json.dumps(canon, indent=1, ensure_ascii=False),

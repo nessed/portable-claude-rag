@@ -75,6 +75,13 @@ def fts_any(words):
     return " OR ".join(f'"{w}"' for w in words) if words else None
 
 
+# A stored page carrying fewer characters than this has no usable text: it is a
+# scan, a blank page, or a page whose only content is a page number. One constant
+# because the coverage count and the citation warnings must agree on what
+# "unreadable" means.
+THIN_CHARS = 50
+
+
 def coverage(db):
     rows = dict(db.execute("SELECT status, COUNT(*) FROM files GROUP BY status").fetchall())
     meta = dict(db.execute("SELECT k, v FROM meta").fetchall())
@@ -88,6 +95,31 @@ def coverage(db):
     failed = sum(v for k, v in rows.items() if k.startswith("failed_"))
     other = sum(v for k, v in rows.items()
                 if not k.startswith("failed_") and k != "indexed")
+    # Pages stored with no usable text: the visible half of a scan. index_build
+    # marks a file `indexed` as soon as ONE page yields text, so a document whose
+    # text layer covers a few pages out of hundreds looks fully indexed and says
+    # nothing about the rest. Counted once here so every caller of coverage() sees
+    # it, including the COVERAGE line the answer policy tells the model to quote.
+    try:
+        thin = db.execute("SELECT COUNT(*) FROM pages_content WHERE length(c2) < ?",
+                          (THIN_CHARS,)).fetchone()[0]
+    except sqlite3.Error:
+        thin = None   # a db without the FTS5 content table still reports coverage
+    # Which files carry those unreadable pages. A count alone can't be acted on -- 23 thin
+    # pages in one big scan and 23 spread over 23 documents need different responses -- and
+    # the caller can't get the split without another full scan of the same table, so it is
+    # computed here, once, alongside the count (this whole function is cached in shelf.db).
+    thin_by_file = []
+    if thin:
+        try:
+            thin_by_file = [
+                {"rel": rel, "thin_pages": n, "pages": total}
+                for rel, n, total in db.execute(
+                    "SELECT c0, SUM(length(c2) < ?), COUNT(*) FROM pages_content "
+                    "GROUP BY c0 HAVING SUM(length(c2) < ?) > 0 "
+                    "ORDER BY SUM(length(c2) < ?) DESC, c0", (THIN_CHARS,) * 3)]
+        except sqlite3.Error:
+            thin_by_file = []
     out = {
         "corpus_root": meta.get("corpus_root"),
         "built_at": meta.get("built_at"),
@@ -97,6 +129,8 @@ def coverage(db):
         "failed": failed,
         "unsupported_or_empty": other,
         "addressable_pages": npages,
+        "thin_pages": thin,
+        "thin_by_file": thin_by_file,
         "by_status": rows,
         "accounting_identity_holds":
             discovered == excluded + indexed + failed + other,

@@ -25,6 +25,7 @@ that mkdir(parents=True) puts new output in the right place.
 """
 import os
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -40,6 +41,29 @@ def _first_existing(*cands):
         if c.exists():
             return c
     return cands[0]
+
+
+# --- the index's page numbering ----------------------------------------------
+# The index number given to the FIRST page of a document.
+#
+# 1 means a citation's `pN` is the PDF's page N -- the number a reader sees in their viewer,
+# so a citation can be checked without arithmetic. 0 is how this package's first index was
+# built, which is why every citation used to need a mental +1 (the reader-side fix that
+# printed "(PDF page N+1)" alongside was a patch for that, not a fix).
+#
+# Changing it is a RE-INDEX: the numbers are stored in `pages`, in the shelf's `captions`,
+# and inside every written note. Both shelf builders look this constant up to find a
+# document's first pages for its title, so they follow it rather than hardcode a number.
+FIRST_PAGE_INDEX = 1
+
+
+def pdf_page_number(page_index):
+    """The PDF's own 1-based page number for a stored `page_index`.
+
+    The only place the two numberings meet: OCR renders a document page by its PDF number,
+    while everything stored and cited uses the index's numbering.
+    """
+    return page_index - FIRST_PAGE_INDEX + 1
 
 
 # --- anchors -----------------------------------------------------------------
@@ -69,6 +93,21 @@ STACKS = CORPUS_LAB / "02_stacks"
 
 RUNS = _env_path("RUNS_ROOT") or _first_existing(
     PRIVATE / "results" / "03_runs", CORPUS_LAB / "03_runs")
+
+
+def hook_log_dir():
+    """Where a Stop hook writes its log.
+
+    F-25: in a portable install RUNS resolves to `<folder's parent>/_private/...`, so the first
+    answer created a directory called `_private` in the recipient's folder. setup passes
+    `--log-dir <artefacts>/hooks` on the hook command line instead -- an argument, not an env
+    prefix, for the same shell-independence reason as the stop guard's `--v2`.
+    """
+    if "--log-dir" in sys.argv:
+        i = sys.argv.index("--log-dir")
+        if i + 1 < len(sys.argv):
+            return Path(sys.argv[i + 1])
+    return RUNS / "hooks"
 SCORES = _env_path("SCORES_ROOT") or _first_existing(
     PRIVATE / "results" / "04_scores", CORPUS_LAB / "04_scores")
 HARNESS_KEYS = _env_path("HARNESS_KEYS") or _first_existing(
